@@ -2274,6 +2274,276 @@ rows and fields with the supplied Tableau CSV, then export the verified
 R mart.</p>
 </div>
 </div>
+<div id="validate-against-the-tableau-csv-and-export-the-r-mart" class="section level2">
+<h2>8. Validate against the Tableau CSV and export the R mart</h2>
+<p>The structure and count checks passed in Step 7. Now compare the
+actual values with the existing SQL-generated Tableau CSV. Match rows
+using their five identifying fields, so differences in row order do not
+affect the comparison. Compare all remaining fields, including the mart
+hash, counts, percentages, display flags, dates, and Gram group.</p>
+<div id="import-the-existing-tableau-export-with-explicit-types" class="section level3">
+<h3>8.1 Import the existing Tableau export with explicit types</h3>
+<p>Set <code>tableau_reference_file</code> to your existing Tableau
+data-source CSV. The path below is an example; there is no need to move
+or duplicate the file. Use the same working directory as the previous
+sections.</p>
+<p>Keep <code>source_version</code> as text even though it looks like a
+date. Parse the two analysis-window fields as dates and the measures as
+numbers. The supplied export uses the literal lowercase
+<code>null</code> for missing percentages, so recognize that value as
+<code>NA</code> during import.</p>
+<pre class="r"><code>tableau_reference_file = &quot;../data/exports/mart_susceptibility.csv&quot;
+
+tableau_reference =
+  read_csv(
+    tableau_reference_file,
+    col_types = cols(
+      .default = col_character(),
+      pair_order = col_double(),
+      eligible_count = col_double(),
+      tested_endpoint_count = col_double(),
+      categorized_count = col_double(),
+      susceptible_count = col_double(),
+      resistant_count = col_double(),
+      intermediate_count = col_double(),
+      inconclusive_count = col_double(),
+      synergism_count = col_double(),
+      missing_result_count = col_double(),
+      conflict_result_count = col_double(),
+      untested_count = col_double(),
+      categorized_result_coverage_pct = col_double(),
+      susceptible_pct = col_double(),
+      resistant_pct = col_double(),
+      analysis_window_start = col_date(format = &quot;%Y-%m-%d&quot;),
+      analysis_window_end_exclusive = col_date(format = &quot;%Y-%m-%d&quot;)
+    ),
+    na = c(&quot;&quot;, &quot;null&quot;),
+    trim_ws = FALSE
+  )
+
+reference_parse_problems = problems(tableau_reference)
+
+if (nrow(reference_parse_problems) &gt; 0L) {
+  print(reference_parse_problems, n = 20, width = Inf)
+  stop(&quot;Resolve the reference CSV parsing problems before comparing marts.&quot;)
+}</code></pre>
+</div>
+<div id="check-column-names-and-row-identities" class="section level3">
+<h3>8.2 Check column names and row identities</h3>
+<p>Both tables must contain the same column names. The natural row
+identity is <code>source_version</code>, <code>cohort_id</code>,
+<code>organism_reporting_group</code>, <code>reporting_phenotype</code>,
+and <code>antibiotic</code>, already stored in <code>mart_id</code>.
+Check these fields for missing values and duplicates before joining.</p>
+<pre class="r"><code>column_check = tibble(
+  reference_columns = ncol(tableau_reference),
+  r_columns = ncol(mart_susceptibility_r),
+  same_column_names = setequal(
+    names(tableau_reference),
+    names(mart_susceptibility_r)
+  ),
+  same_column_order = identical(
+    names(tableau_reference),
+    names(mart_susceptibility_r)
+  )
+)
+
+print(column_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 4
+##   reference_columns r_columns same_column_names same_column_order
+##               &lt;int&gt;     &lt;int&gt; &lt;lgl&gt;             &lt;lgl&gt;            
+## 1                26        26 TRUE              TRUE</code></pre>
+<pre class="r"><code>if (!column_check$same_column_names) {
+  print(list(
+    only_in_reference = setdiff(
+      names(tableau_reference), names(mart_susceptibility_r)
+    ),
+    only_in_r = setdiff(
+      names(mart_susceptibility_r), names(tableau_reference)
+    )
+  ))
+  stop(&quot;The R mart and reference CSV have different columns.&quot;)
+}
+
+r_keys =
+  mart_susceptibility_r %&gt;%
+  select(all_of(mart_id))
+
+reference_keys =
+  tableau_reference %&gt;%
+  select(all_of(mart_id))
+
+key_check = tibble(
+  dataset = c(&quot;R mart&quot;, &quot;Tableau CSV&quot;),
+  row_count = c(nrow(r_keys), nrow(reference_keys)),
+  duplicate_key_rows = c(
+    nrow(r_keys) - nrow(distinct(r_keys)),
+    nrow(reference_keys) - nrow(distinct(reference_keys))
+  ),
+  missing_key_rows = c(
+    sum(!complete.cases(r_keys)),
+    sum(!complete.cases(reference_keys))
+  )
+)
+
+print(key_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 2 × 4
+##   dataset     row_count duplicate_key_rows missing_key_rows
+##   &lt;chr&gt;           &lt;int&gt;              &lt;int&gt;            &lt;int&gt;
+## 1 R mart            396                  0                0
+## 2 Tableau CSV       396                  0                0</code></pre>
+<pre class="r"><code>if (any(key_check$duplicate_key_rows &gt; 0L | key_check$missing_key_rows &gt; 0L)) {
+  stop(&quot;Resolve missing or duplicate row identities before comparing values.&quot;)
+}</code></pre>
+</div>
+<div id="find-missing-or-extra-rows" class="section level3">
+<h3>8.3 Find missing or extra rows</h3>
+<p>The two <code>anti_join()</code> operations identify any row
+identities present in only one table. Both results should have zero
+rows.</p>
+<pre class="r"><code>missing_from_r =
+  reference_keys %&gt;%
+  anti_join(r_keys, by = mart_id, na_matches = &quot;never&quot;)
+
+extra_in_r =
+  r_keys %&gt;%
+  anti_join(reference_keys, by = mart_id, na_matches = &quot;never&quot;)
+
+print(missing_from_r, n = 20, width = Inf)</code></pre>
+<pre><code>## # A tibble: 0 × 5
+## # ℹ 5 variables: source_version &lt;chr&gt;, cohort_id &lt;chr&gt;, organism_reporting_group &lt;chr&gt;, reporting_phenotype &lt;chr&gt;, antibiotic &lt;chr&gt;</code></pre>
+<pre class="r"><code>print(extra_in_r, n = 20, width = Inf)</code></pre>
+<pre><code>## # A tibble: 0 × 5
+## # ℹ 5 variables: source_version &lt;chr&gt;, cohort_id &lt;chr&gt;, organism_reporting_group &lt;chr&gt;, reporting_phenotype &lt;chr&gt;, antibiotic &lt;chr&gt;</code></pre>
+</div>
+<div id="compare-every-remaining-field" class="section level3">
+<h3>8.4 Compare every remaining field</h3>
+<p>Convert the values to a common text representation after numbers and
+dates have been parsed. This allows different field types to appear in
+one long comparison table. Numeric values such as <code>100</code> and
+<code>100.0</code> compare equally; dates use their ISO representation.
+Text values retain their spelling and whitespace.</p>
+<p>The join compares fields only for matching row identities. Missing
+and extra rows are checked separately above. Two missing values match,
+while a missing value on only one side is a difference.</p>
+<pre class="r"><code>value_columns = setdiff(names(tableau_reference), mart_id)
+
+r_values =
+  mart_susceptibility_r %&gt;%
+  mutate(
+    across(where(is.numeric), as.double),
+    across(all_of(value_columns), as.character)
+  ) %&gt;%
+  pivot_longer(
+    cols = all_of(value_columns),
+    names_to = &quot;field&quot;,
+    values_to = &quot;r_value&quot;
+  )
+
+reference_values =
+  tableau_reference %&gt;%
+  mutate(across(all_of(value_columns), as.character)) %&gt;%
+  pivot_longer(
+    cols = all_of(value_columns),
+    names_to = &quot;field&quot;,
+    values_to = &quot;reference_value&quot;
+  )
+
+field_comparison =
+  r_values %&gt;%
+  inner_join(
+    reference_values,
+    by = c(mart_id, &quot;field&quot;),
+    na_matches = &quot;never&quot;,
+    relationship = &quot;one-to-one&quot;
+  ) %&gt;%
+  mutate(
+    values_match =
+      coalesce(r_value == reference_value, FALSE) |
+      (is.na(r_value) &amp; is.na(reference_value))
+  )
+
+field_differences =
+  field_comparison %&gt;%
+  filter(!values_match) %&gt;%
+  select(all_of(mart_id), field, r_value, reference_value)
+
+comparison_check = tibble(
+  reference_rows = nrow(tableau_reference),
+  r_rows = nrow(mart_susceptibility_r),
+  missing_from_r = nrow(missing_from_r),
+  extra_in_r = nrow(extra_in_r),
+  nonkey_fields_compared = length(value_columns),
+  field_values_compared = nrow(field_comparison),
+  field_mismatches = nrow(field_differences)
+) %&gt;%
+  mutate(
+    matches_reference =
+      missing_from_r == 0L &amp;
+      extra_in_r == 0L &amp;
+      field_mismatches == 0L &amp;
+      reference_rows &gt; 0L
+  )
+
+print(comparison_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 8
+##   reference_rows r_rows missing_from_r extra_in_r nonkey_fields_compared
+##            &lt;int&gt;  &lt;int&gt;          &lt;int&gt;      &lt;int&gt;                  &lt;int&gt;
+## 1            396    396              0          0                     21
+##   field_values_compared field_mismatches matches_reference
+##                   &lt;int&gt;            &lt;int&gt; &lt;lgl&gt;            
+## 1                  8316                0 TRUE</code></pre>
+<pre class="r"><code>print(field_differences, n = 20, width = Inf)</code></pre>
+<pre><code>## # A tibble: 0 × 8
+## # ℹ 8 variables: source_version &lt;chr&gt;, cohort_id &lt;chr&gt;, organism_reporting_group &lt;chr&gt;, reporting_phenotype &lt;chr&gt;, antibiotic &lt;chr&gt;, field &lt;chr&gt;, r_value &lt;chr&gt;, reference_value &lt;chr&gt;</code></pre>
+<p>For the supplied CSV, expect 396 rows in both tables, zero missing or
+extra rows, and zero field mismatches. The comparison covers 21 nonkey
+fields across 396 rows: 8,316 field values, in addition to the five
+identifying fields. <code>matches_reference</code> should be
+<code>TRUE</code>.</p>
+<p>If differences appear, review <code>field_differences</code>,
+<code>missing_from_r</code>, and <code>extra_in_r</code>. The export
+below stops when the comparison fails.</p>
+</div>
+<div id="export-the-verified-r-mart" class="section level3">
+<h3>8.5 Export the verified R mart</h3>
+<p>Write a separate R-generated CSV after the comparison passes. Keep
+the reference column order and use the same lowercase <code>null</code>
+missing-value marker as the supplied export. Change
+<code>output_file</code> if you prefer a different output folder.</p>
+<pre class="r"><code>if (!isTRUE(comparison_check$matches_reference)) {
+  stop(&quot;The marts differ. Review the comparison results before exporting.&quot;)
+}
+
+output_file = &quot;../data/processed/mart_susceptibility_r.csv&quot;
+
+dir.create(dirname(output_file), recursive = TRUE, showWarnings = FALSE)
+
+mart_susceptibility_r %&gt;%
+  select(all_of(names(tableau_reference))) %&gt;%
+  write_csv(output_file, na = &quot;null&quot;)
+
+export_check = tibble(
+  output_file = output_file,
+  exported_rows = nrow(mart_susceptibility_r),
+  exported_columns = ncol(mart_susceptibility_r),
+  matches_tableau_reference = comparison_check$matches_reference
+)
+
+print(export_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 4
+##   output_file                                 exported_rows exported_columns
+##   &lt;chr&gt;                                               &lt;int&gt;            &lt;int&gt;
+## 1 ../data/processed/mart_susceptibility_r.csv           396               26
+##   matches_tableau_reference
+##   &lt;lgl&gt;                    
+## 1 TRUE</code></pre>
+<p>When these checks pass, this R Markdown document demonstrates the
+complete transformation from the original cultures CSV to the same
+cleaned susceptibility mart used by Tableau, using the project’s shared
+reference tables and tidyverse transformations.</p>
+</div>
+</div>
 
 
 
