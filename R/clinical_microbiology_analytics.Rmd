@@ -1,0 +1,102 @@
+---
+title: "clinical_microbiology_analytics"
+output: html_document
+date: "2026-10-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Reproduce the ARMD Tableau susceptibility mart with tidyverse transformations.
+# Step 1: import and stage the original cultures CSV.
+# Later steps will be appended to this same script after inspecting this output.
+#
+# Suggested repository location: R/build_mart_susceptibility.R
+# Run from the repository root. Change raw_data_file to your existing CSV path;
+# there is no need to move or duplicate the source data.
+```{r}
+library(tidyverse)
+library(lubridate)
+
+raw_data_file = "../data/raw/microbiology_cultures_cohort.csv"
+source_release = "2025-04-11"
+```
+# Match the scope recorded in the supplied Tableau CSV.
+# Define these now, but apply the window after resolving culture-level fields.
+
+```{r}
+analysis_window_start = as.Date("2023-01-01")
+analysis_window_end_exclusive = analysis_window_start %m+% months(12)
+```
+
+# Import as text so patient/order identifiers are preserved and field cleaning
+# is explicit. Blank CSV fields become NA; the literal "Null" is handled below.
+# Do not let read_csv trim the raw AST category before we preserve it.
+
+```{r}
+raw_armd =
+  read_csv(
+    raw_data_file,
+    col_types = cols(.default = col_character()),
+    na = "",
+    trim_ws = FALSE
+  ) %>%
+  janitor::clean_names()
+```
+
+# Keep one row per original source row. Do not drop missing AST records or
+# deduplicate yet: those records affect reconciliation and reporting coverage.
+
+```{r}
+armd_staged =
+  raw_armd %>%
+  transmute(
+    source_version = source_release,
+    patient_key = anon_id,
+    encounter_key = pat_enc_csn_id_coded,
+    culture_order_key = order_proc_id_coded,
+    order_time_jittered_utc_raw = order_time_jittered_utc,
+    culture_time_shifted = ymd_hms(
+      order_time_jittered_utc,
+      tz = "UTC",
+      quiet = TRUE
+    ),
+    ordering_mode = na_if(str_trim(ordering_mode), "Null"),
+    culture_description = na_if(str_trim(culture_description), "Null"),
+    was_positive = as.integer(na_if(str_trim(was_positive), "Null")),
+    organism = na_if(str_trim(organism), "Null"),
+    antibiotic = na_if(str_trim(antibiotic), "Null"),
+    susceptibility_raw = susceptibility,
+    susceptibility = str_trim(na_if(susceptibility, "Null"))
+  )
+```
+
+# Inspect the first stage before building the reporting population.
+# A nonzero timestamp_parse_failures count needs review before proceeding.
+# The dates are shifted research timestamps, not verified clinical dates.
+
+```{r}
+import_check =
+  armd_staged %>%
+  summarise(
+    source_rows = n(),
+    timestamp_parse_failures = sum(
+      !is.na(order_time_jittered_utc_raw) &
+        !(order_time_jittered_utc_raw %in% c("", "Null")) &
+        is.na(culture_time_shifted)
+    ),
+    missing_patient_keys = sum(is.na(patient_key)),
+    missing_order_keys = sum(is.na(culture_order_key))
+  )
+
+print(import_check)
+glimpse(armd_staged)
+
+armd_staged %>%
+  count(culture_description, sort = TRUE) %>%
+  print(n = Inf)
+```
+
+# This is the first stage only; it does not yet generate the final mart.
+# Next: resolve culture-level fields and repeated AST endpoints.

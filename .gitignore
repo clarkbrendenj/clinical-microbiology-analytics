@@ -57,3 +57,4 @@ databricks.yml
 # Retired notebook README files
 /notebooks/README.md
 /notebooks/pipeline validation/README.md
+.Rproj.user
