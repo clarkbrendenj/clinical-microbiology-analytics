@@ -1896,6 +1896,384 @@ organism-antibiotic pairs, apply scoped exclusions, and calculate the
 final mart’s counts, percentages, and display flags.</p>
 </div>
 </div>
+<div id="apply-antibiotic-panels-and-build-the-susceptibility-mart" class="section level2">
+<h2>7. Apply antibiotic panels and build the susceptibility mart</h2>
+<p>Start with the selected cultures, expand each population to its
+approved antibiotics, and then attach AST. This keeps untested
+antibiotics in the eligible denominator. Apply the same reviewed panel
+and exclusion files as the SQL pipeline.</p>
+<div id="load-approved-antibiotic-pairs-and-exclusion-rules" class="section level3">
+<h3>7.1 Load approved antibiotic pairs and exclusion rules</h3>
+<p>Only panel rows marked for the primary dashboard and reviewed are
+approved. An exclusion can apply to one cohort or phenotype, or to all
+of them using <code>*</code>. These are the project’s existing reporting
+policies; they do not change the AST evidence retained in earlier
+stages.</p>
+<pre class="r"><code>approved_pairs =
+  read_csv(
+    file.path(seed_dir, &quot;reportable_organism_antibiotic_pairs.csv&quot;),
+    col_types = cols(
+      .default = col_character(),
+      pair_order = col_integer(),
+      include_primary_dashboard = col_integer()
+    ),
+    na = &quot;&quot;,
+    trim_ws = FALSE
+  ) %&gt;%
+  filter(
+    include_primary_dashboard == 1L,
+    review_status == &quot;reviewed&quot;
+  ) %&gt;%
+  select(organism_reporting_group, cohort_id, antibiotic, pair_order)
+
+exclusion_rules =
+  read_csv(
+    file.path(seed_dir, &quot;organism_antibiotic_exclusions.csv&quot;),
+    col_types = cols(.default = col_character()),
+    na = &quot;&quot;,
+    trim_ws = FALSE
+  ) %&gt;%
+  transmute(
+    organism_reporting_group,
+    antibiotic,
+    cohort_scope = cohort_id,
+    phenotype_scope = reporting_phenotype
+  ) %&gt;%
+  distinct()</code></pre>
+</div>
+<div id="determine-which-pairs-each-reporting-population-can-publish" class="section level3">
+<h3>7.2 Determine which pairs each reporting population can publish</h3>
+<p>The same organism can have different exclusions in its ordinary and
+resistant categories. Resolve those rules after the published phenotype
+is known. Make a distinct list of excluded combinations, then remove
+them with <code>anti_join()</code>. Overlapping rules therefore cannot
+multiply the reporting rows.</p>
+<p>The panel joins intentionally expand one population to several
+antibiotics and reuse the same organism panel across phenotypes.</p>
+<pre class="r"><code>population_id = c(
+  &quot;source_version&quot;,
+  &quot;cohort_id&quot;,
+  &quot;organism_reporting_group&quot;,
+  &quot;reporting_phenotype&quot;
+)
+
+mart_id = c(population_id, &quot;antibiotic&quot;)
+
+population_panels =
+  selected_cultures %&gt;%
+  select(all_of(population_id)) %&gt;%
+  distinct() %&gt;%
+  inner_join(
+    approved_pairs,
+    by = c(&quot;organism_reporting_group&quot;, &quot;cohort_id&quot;),
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-many&quot;
+  )
+
+excluded_pairs =
+  population_panels %&gt;%
+  inner_join(
+    exclusion_rules,
+    by = c(&quot;organism_reporting_group&quot;, &quot;antibiotic&quot;),
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-many&quot;
+  ) %&gt;%
+  filter(
+    cohort_scope == &quot;*&quot; | cohort_id == cohort_scope,
+    phenotype_scope == &quot;*&quot; | reporting_phenotype == phenotype_scope
+  ) %&gt;%
+  select(all_of(mart_id)) %&gt;%
+  distinct()
+
+reporting_pairs =
+  population_panels %&gt;%
+  anti_join(excluded_pairs, by = mart_id, na_matches = &quot;never&quot;)</code></pre>
+</div>
+<div id="expand-selected-cultures-and-attach-their-antibiotic-results" class="section level3">
+<h3>7.3 Expand selected cultures and attach their antibiotic
+results</h3>
+<p>Every eligible culture receives one row for each permitted
+antibiotic. The <code>left_join()</code> then attaches any observed
+endpoint. A missing joined status means the antibiotic was untested. An
+endpoint whose status is <code>missing</code> means it was present in
+the source but lacked a usable result; these are counted separately.</p>
+<pre class="r"><code>eligible_grid =
+  selected_cultures %&gt;%
+  select(all_of(selected_culture_id), organism_name) %&gt;%
+  inner_join(
+    reporting_pairs,
+    by = population_id,
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-many&quot;
+  )
+
+endpoint_id = c(selected_culture_id, &quot;antibiotic&quot;)
+
+reporting_endpoints =
+  eligible_grid %&gt;%
+  left_join(
+    selected_ast %&gt;%
+      select(
+        all_of(endpoint_id),
+        resolution_status,
+        susceptibility,
+        reconciliation_reason
+      ),
+    by = endpoint_id,
+    na_matches = &quot;never&quot;,
+    relationship = &quot;one-to-one&quot;
+  )</code></pre>
+</div>
+<div id="calculate-result-counts" class="section level3">
+<h3>7.4 Calculate result counts</h3>
+<p>Summarise to one row per reporting population and antibiotic.
+<code>categorized_count</code> includes only resolved Susceptible,
+Intermediate, and Resistant results. Inconclusive, Synergism, missing,
+conflicting, and untested endpoints remain separate counts.</p>
+<p>Using <code>%in%</code> below produces <code>FALSE</code> for missing
+values, so absent endpoints cannot turn a count into
+<code>NA</code>.</p>
+<pre class="r"><code>mart_counts =
+  reporting_endpoints %&gt;%
+  group_by(
+    source_version,
+    cohort_id,
+    organism_reporting_group,
+    organism_name,
+    reporting_phenotype,
+    antibiotic,
+    pair_order
+  ) %&gt;%
+  summarise(
+    eligible_count = n(),
+    tested_endpoint_count = sum(!is.na(resolution_status)),
+    categorized_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% c(&quot;Susceptible&quot;, &quot;Intermediate&quot;, &quot;Resistant&quot;)
+    ),
+    susceptible_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% &quot;Susceptible&quot;
+    ),
+    resistant_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% &quot;Resistant&quot;
+    ),
+    intermediate_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% &quot;Intermediate&quot;
+    ),
+    inconclusive_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% &quot;Inconclusive&quot;
+    ),
+    synergism_count = sum(
+      resolution_status %in% &quot;resolved&quot; &amp;
+      susceptibility %in% &quot;Synergism&quot;
+    ),
+    missing_result_count = sum(resolution_status %in% &quot;missing&quot;),
+    conflict_result_count = sum(resolution_status %in% &quot;conflict&quot;),
+    untested_count = sum(is.na(resolution_status)),
+    .groups = &quot;drop&quot;
+  )</code></pre>
+</div>
+<div id="add-percentages-display-flags-and-final-metadata" class="section level3">
+<h3>7.5 Add percentages, display flags, and final metadata</h3>
+<p>Coverage uses all eligible observations as its denominator. Percent
+susceptible and percent resistant use only categorized S/I/R results. A
+zero denominator produces <code>NA</code>.</p>
+<p>The helper rounds nonnegative percentages to one decimal with ties
+rounded upward, matching the SQL. Base R’s <code>round()</code> uses a
+different tie rule. Scaling the counts by 1,000 before dividing also
+avoids introducing an extra rounding step at percentage half-ties.</p>
+<p>The display flag requires at least 30 categorized results. Keep all
+rows and their calculated percentages, including those flagged
+<code>insufficient_data</code>.</p>
+<pre class="r"><code>percentage_1dp = function(numerator, denominator) {
+  floor(
+    1000 * as.double(numerator) /
+      na_if(as.double(denominator), 0) + 0.5
+  ) / 10
+}
+
+mart_susceptibility_r =
+  mart_counts %&gt;%
+  mutate(
+    susceptibility_mart_key = make_dbt_key(pick(all_of(mart_id)), mart_id),
+    .before = 1
+  ) %&gt;%
+  mutate(
+    categorized_result_coverage_pct = percentage_1dp(
+      categorized_count,
+      eligible_count
+    ),
+    susceptible_pct = percentage_1dp(susceptible_count, categorized_count),
+    resistant_pct = percentage_1dp(resistant_count, categorized_count),
+    display_status = if_else(
+      categorized_count &gt;= 30L,
+      &quot;display&quot;,
+      &quot;insufficient_data&quot;
+    ),
+    analysis_window_start = .env$analysis_window_start,
+    analysis_window_end_exclusive = .env$analysis_window_end_exclusive
+  ) %&gt;%
+  left_join(
+    organism_reporting_groups %&gt;%
+      select(organism_reporting_group, gram_stain_group),
+    by = &quot;organism_reporting_group&quot;,
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-one&quot;
+  ) %&gt;%
+  arrange(
+    source_version,
+    cohort_id,
+    organism_reporting_group,
+    reporting_phenotype,
+    pair_order,
+    antibiotic
+  )</code></pre>
+<p>The resulting <code>mart_susceptibility_r</code> uses the same 26
+columns and column order as the supplied Tableau CSV. Its row order is
+for readability; the final comparison will match rows by their keys.</p>
+</div>
+<div id="check-the-marts-structure-and-count-reconciliation" class="section level3">
+<h3>7.6 Check the mart’s structure and count reconciliation</h3>
+<p>For the supplied release, window, and seed files, expect 396 rows, 26
+columns, and 73 reporting populations. Every failure count below should
+be zero. The display-status counts should be 187 <code>display</code>
+and 209 <code>insufficient_data</code>.</p>
+<pre class="r"><code>mart_build_check =
+  mart_susceptibility_r %&gt;%
+  summarise(
+    mart_rows = n(),
+    duplicate_mart_keys = n() - n_distinct(susceptibility_mart_key),
+    eligible_balance_failures = sum(
+      eligible_count != tested_endpoint_count + untested_count
+    ),
+    categorized_balance_failures = sum(
+      categorized_count !=
+        susceptible_count + intermediate_count + resistant_count
+    ),
+    endpoint_balance_failures = sum(
+      tested_endpoint_count !=
+        categorized_count + inconclusive_count + synergism_count +
+        missing_result_count + conflict_result_count
+    ),
+    missing_gram_groups = sum(is.na(gram_stain_group))
+  ) %&gt;%
+  mutate(
+    mart_columns = ncol(mart_susceptibility_r),
+    reporting_populations = nrow(
+      mart_susceptibility_r %&gt;%
+        select(all_of(population_id)) %&gt;%
+        distinct()
+    )
+  )
+
+print(mart_build_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 8
+##   mart_rows duplicate_mart_keys eligible_balance_failures
+##       &lt;int&gt;               &lt;int&gt;                     &lt;int&gt;
+## 1       396                   0                         0
+##   categorized_balance_failures endpoint_balance_failures missing_gram_groups
+##                          &lt;int&gt;                     &lt;int&gt;               &lt;int&gt;
+## 1                            0                         0                   0
+##   mart_columns reporting_populations
+##          &lt;int&gt;                 &lt;int&gt;
+## 1           26                    73</code></pre>
+<pre class="r"><code>mart_susceptibility_r %&gt;%
+  count(display_status, name = &quot;mart_rows&quot;) %&gt;%
+  print(n = Inf)</code></pre>
+<pre><code>## # A tibble: 2 × 2
+##   display_status    mart_rows
+##   &lt;chr&gt;                 &lt;int&gt;
+## 1 display                 187
+## 2 insufficient_data       209</code></pre>
+<pre class="r"><code>mart_susceptibility_r %&gt;%
+  select(
+    cohort_id,
+    organism_name,
+    antibiotic,
+    eligible_count,
+    categorized_count,
+    susceptible_pct,
+    display_status
+  ) %&gt;%
+  print(n = 20, width = Inf)</code></pre>
+<pre><code>## # A tibble: 396 × 7
+##    cohort_id organism_name                                 
+##    &lt;chr&gt;     &lt;chr&gt;                                         
+##  1 blood     Citrobacter freundii complex                  
+##  2 blood     Citrobacter freundii complex                  
+##  3 blood     Citrobacter freundii complex                  
+##  4 blood     Citrobacter freundii complex                  
+##  5 blood     Citrobacter freundii complex                  
+##  6 blood     Citrobacter freundii complex                  
+##  7 blood     Citrobacter freundii complex                  
+##  8 blood     Citrobacter koseri                            
+##  9 blood     Citrobacter koseri                            
+## 10 blood     Citrobacter koseri                            
+## 11 blood     Citrobacter koseri                            
+## 12 blood     Citrobacter koseri                            
+## 13 blood     Citrobacter koseri                            
+## 14 blood     Citrobacter koseri                            
+## 15 blood     Citrobacter koseri                            
+## 16 blood     Coagulase-negative staphylococci (unspeciated)
+## 17 blood     Coagulase-negative staphylococci (unspeciated)
+## 18 blood     Coagulase-negative staphylococci (unspeciated)
+## 19 blood     Enterobacter cloacae complex                  
+## 20 blood     Enterobacter cloacae complex                  
+##    antibiotic                    eligible_count categorized_count
+##    &lt;chr&gt;                                  &lt;int&gt;             &lt;int&gt;
+##  1 Ciprofloxacin                              8                 8
+##  2 Gentamicin                                 8                 8
+##  3 Trimethoprim/Sulfamethoxazole              8                 8
+##  4 Cefepime                                   8                 2
+##  5 Meropenem                                  8                 8
+##  6 Ertapenem                                  8                 8
+##  7 Levofloxacin                               8                 7
+##  8 Ceftriaxone                                5                 5
+##  9 Ciprofloxacin                              5                 5
+## 10 Gentamicin                                 5                 5
+## 11 Trimethoprim/Sulfamethoxazole              5                 5
+## 12 Meropenem                                  5                 5
+## 13 Ertapenem                                  5                 5
+## 14 Levofloxacin                               5                 5
+## 15 Piperacillin/Tazobactam                    5                 5
+## 16 Vancomycin                                57                57
+## 17 Trimethoprim/Sulfamethoxazole             57                57
+## 18 Erythromycin                              57                57
+## 19 Gentamicin                                22                22
+## 20 Meropenem                                 22                22
+##    susceptible_pct display_status   
+##              &lt;dbl&gt; &lt;chr&gt;            
+##  1            87.5 insufficient_data
+##  2            87.5 insufficient_data
+##  3            87.5 insufficient_data
+##  4            50   insufficient_data
+##  5           100   insufficient_data
+##  6           100   insufficient_data
+##  7            71.4 insufficient_data
+##  8           100   insufficient_data
+##  9           100   insufficient_data
+## 10           100   insufficient_data
+## 11           100   insufficient_data
+## 12           100   insufficient_data
+## 13           100   insufficient_data
+## 14           100   insufficient_data
+## 15            80   insufficient_data
+## 16           100   display          
+## 17            47.4 display          
+## 18            35.1 display          
+## 19            95.5 insufficient_data
+## 20           100   insufficient_data
+## # ℹ 376 more rows</code></pre>
+<p>Matching these totals checks the structure, but does not yet
+establish that every result matches SQL. The next stage will compare all
+rows and fields with the supplied Tableau CSV, then export the verified
+R mart.</p>
+</div>
+</div>
 
 
 

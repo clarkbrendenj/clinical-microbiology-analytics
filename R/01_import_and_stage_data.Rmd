@@ -1390,3 +1390,577 @@ selected_cultures %>%
 The next stage will expand the selected populations to approved
 organism-antibiotic pairs, apply scoped exclusions, and calculate the
 final mart's counts, percentages, and display flags.
+
+## 7. Apply antibiotic panels and build the susceptibility mart
+
+Start with the selected cultures, expand each population to its approved
+antibiotics, and then attach AST. This keeps untested antibiotics in the
+eligible denominator. Apply the same reviewed panel and exclusion files
+as the SQL pipeline.
+
+### 7.1 Load approved antibiotic pairs and exclusion rules
+
+Only panel rows marked for the primary dashboard and reviewed are
+approved. An exclusion can apply to one cohort or phenotype, or to all
+of them using `*`. These are the project's existing reporting policies;
+they do not change the AST evidence retained in earlier stages.
+
+```{r load-antibiotic-reporting-rules}
+approved_pairs =
+  read_csv(
+    file.path(seed_dir, "reportable_organism_antibiotic_pairs.csv"),
+    col_types = cols(
+      .default = col_character(),
+      pair_order = col_integer(),
+      include_primary_dashboard = col_integer()
+    ),
+    na = "",
+    trim_ws = FALSE
+  ) %>%
+  filter(
+    include_primary_dashboard == 1L,
+    review_status == "reviewed"
+  ) %>%
+  select(organism_reporting_group, cohort_id, antibiotic, pair_order)
+
+exclusion_rules =
+  read_csv(
+    file.path(seed_dir, "organism_antibiotic_exclusions.csv"),
+    col_types = cols(.default = col_character()),
+    na = "",
+    trim_ws = FALSE
+  ) %>%
+  transmute(
+    organism_reporting_group,
+    antibiotic,
+    cohort_scope = cohort_id,
+    phenotype_scope = reporting_phenotype
+  ) %>%
+  distinct()
+```
+
+### 7.2 Determine which pairs each reporting population can publish
+
+The same organism can have different exclusions in its ordinary and
+resistant categories. Resolve those rules after the published phenotype
+is known. Make a distinct list of excluded combinations, then remove
+them with `anti_join()`. Overlapping rules therefore cannot multiply
+the reporting rows.
+
+The panel joins intentionally expand one population to several
+antibiotics and reuse the same organism panel across phenotypes.
+
+```{r apply-population-specific-antibiotic-panels}
+population_id = c(
+  "source_version",
+  "cohort_id",
+  "organism_reporting_group",
+  "reporting_phenotype"
+)
+
+mart_id = c(population_id, "antibiotic")
+
+population_panels =
+  selected_cultures %>%
+  select(all_of(population_id)) %>%
+  distinct() %>%
+  inner_join(
+    approved_pairs,
+    by = c("organism_reporting_group", "cohort_id"),
+    na_matches = "never",
+    relationship = "many-to-many"
+  )
+
+excluded_pairs =
+  population_panels %>%
+  inner_join(
+    exclusion_rules,
+    by = c("organism_reporting_group", "antibiotic"),
+    na_matches = "never",
+    relationship = "many-to-many"
+  ) %>%
+  filter(
+    cohort_scope == "*" | cohort_id == cohort_scope,
+    phenotype_scope == "*" | reporting_phenotype == phenotype_scope
+  ) %>%
+  select(all_of(mart_id)) %>%
+  distinct()
+
+reporting_pairs =
+  population_panels %>%
+  anti_join(excluded_pairs, by = mart_id, na_matches = "never")
+```
+
+### 7.3 Expand selected cultures and attach their antibiotic results
+
+Every eligible culture receives one row for each permitted antibiotic.
+The `left_join()` then attaches any observed endpoint. A missing joined
+status means the antibiotic was untested. An endpoint whose status is
+`missing` means it was present in the source but lacked a usable result;
+these are counted separately.
+
+```{r expand-cultures-and-attach-endpoints}
+eligible_grid =
+  selected_cultures %>%
+  select(all_of(selected_culture_id), organism_name) %>%
+  inner_join(
+    reporting_pairs,
+    by = population_id,
+    na_matches = "never",
+    relationship = "many-to-many"
+  )
+
+endpoint_id = c(selected_culture_id, "antibiotic")
+
+reporting_endpoints =
+  eligible_grid %>%
+  left_join(
+    selected_ast %>%
+      select(
+        all_of(endpoint_id),
+        resolution_status,
+        susceptibility,
+        reconciliation_reason
+      ),
+    by = endpoint_id,
+    na_matches = "never",
+    relationship = "one-to-one"
+  )
+```
+
+### 7.4 Calculate result counts
+
+Summarise to one row per reporting population and antibiotic.
+`categorized_count` includes only resolved Susceptible, Intermediate,
+and Resistant results. Inconclusive, Synergism, missing, conflicting,
+and untested endpoints remain separate counts.
+
+Using `%in%` below produces `FALSE` for missing values, so absent
+endpoints cannot turn a count into `NA`.
+
+```{r aggregate-susceptibility-counts}
+mart_counts =
+  reporting_endpoints %>%
+  group_by(
+    source_version,
+    cohort_id,
+    organism_reporting_group,
+    organism_name,
+    reporting_phenotype,
+    antibiotic,
+    pair_order
+  ) %>%
+  summarise(
+    eligible_count = n(),
+    tested_endpoint_count = sum(!is.na(resolution_status)),
+    categorized_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% c("Susceptible", "Intermediate", "Resistant")
+    ),
+    susceptible_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% "Susceptible"
+    ),
+    resistant_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% "Resistant"
+    ),
+    intermediate_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% "Intermediate"
+    ),
+    inconclusive_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% "Inconclusive"
+    ),
+    synergism_count = sum(
+      resolution_status %in% "resolved" &
+      susceptibility %in% "Synergism"
+    ),
+    missing_result_count = sum(resolution_status %in% "missing"),
+    conflict_result_count = sum(resolution_status %in% "conflict"),
+    untested_count = sum(is.na(resolution_status)),
+    .groups = "drop"
+  )
+```
+
+### 7.5 Add percentages, display flags, and final metadata
+
+Coverage uses all eligible observations as its denominator. Percent
+susceptible and percent resistant use only categorized S/I/R results.
+A zero denominator produces `NA`.
+
+The helper rounds nonnegative percentages to one decimal with ties
+rounded upward, matching the SQL. Base R's `round()` uses a different
+tie rule. Scaling the counts by 1,000 before dividing also avoids
+introducing an extra rounding step at percentage half-ties.
+
+The display flag requires at least 30 categorized results. Keep all
+rows and their calculated percentages, including those flagged
+`insufficient_data`.
+
+```{r finish-susceptibility-mart}
+percentage_1dp = function(numerator, denominator) {
+  floor(
+    1000 * as.double(numerator) /
+      na_if(as.double(denominator), 0) + 0.5
+  ) / 10
+}
+
+mart_susceptibility_r =
+  mart_counts %>%
+  mutate(
+    susceptibility_mart_key = make_dbt_key(pick(all_of(mart_id)), mart_id),
+    .before = 1
+  ) %>%
+  mutate(
+    categorized_result_coverage_pct = percentage_1dp(
+      categorized_count,
+      eligible_count
+    ),
+    susceptible_pct = percentage_1dp(susceptible_count, categorized_count),
+    resistant_pct = percentage_1dp(resistant_count, categorized_count),
+    display_status = if_else(
+      categorized_count >= 30L,
+      "display",
+      "insufficient_data"
+    ),
+    analysis_window_start = .env$analysis_window_start,
+    analysis_window_end_exclusive = .env$analysis_window_end_exclusive
+  ) %>%
+  left_join(
+    organism_reporting_groups %>%
+      select(organism_reporting_group, gram_stain_group),
+    by = "organism_reporting_group",
+    na_matches = "never",
+    relationship = "many-to-one"
+  ) %>%
+  arrange(
+    source_version,
+    cohort_id,
+    organism_reporting_group,
+    reporting_phenotype,
+    pair_order,
+    antibiotic
+  )
+```
+
+The resulting `mart_susceptibility_r` uses the same 26 columns and
+column order as the supplied Tableau CSV. Its row order is for
+readability; the final comparison will match rows by their keys.
+
+### 7.6 Check the mart's structure and count reconciliation
+
+For the supplied release, window, and seed files, expect 396 rows,
+26 columns, and 73 reporting populations. Every failure count below
+should be zero. The display-status counts should be 187 `display`
+and 209 `insufficient_data`.
+
+```{r check-susceptibility-mart}
+mart_build_check =
+  mart_susceptibility_r %>%
+  summarise(
+    mart_rows = n(),
+    duplicate_mart_keys = n() - n_distinct(susceptibility_mart_key),
+    eligible_balance_failures = sum(
+      eligible_count != tested_endpoint_count + untested_count
+    ),
+    categorized_balance_failures = sum(
+      categorized_count !=
+        susceptible_count + intermediate_count + resistant_count
+    ),
+    endpoint_balance_failures = sum(
+      tested_endpoint_count !=
+        categorized_count + inconclusive_count + synergism_count +
+        missing_result_count + conflict_result_count
+    ),
+    missing_gram_groups = sum(is.na(gram_stain_group))
+  ) %>%
+  mutate(
+    mart_columns = ncol(mart_susceptibility_r),
+    reporting_populations = nrow(
+      mart_susceptibility_r %>%
+        select(all_of(population_id)) %>%
+        distinct()
+    )
+  )
+
+print(mart_build_check, width = Inf)
+
+mart_susceptibility_r %>%
+  count(display_status, name = "mart_rows") %>%
+  print(n = Inf)
+
+mart_susceptibility_r %>%
+  select(
+    cohort_id,
+    organism_name,
+    antibiotic,
+    eligible_count,
+    categorized_count,
+    susceptible_pct,
+    display_status
+  ) %>%
+  print(n = 20, width = Inf)
+```
+
+Matching these totals checks the structure, but does not yet establish
+that every result matches SQL. The next stage will compare all rows and
+fields with the supplied Tableau CSV, then export the verified R mart.
+
+## 8. Validate against the Tableau CSV and export the R mart
+
+The structure and count checks passed in Step 7. Now compare the actual
+values with the existing SQL-generated Tableau CSV. Match rows using
+their five identifying fields, so differences in row order do not affect
+the comparison. Compare all remaining fields, including the mart hash,
+counts, percentages, display flags, dates, and Gram group.
+
+### 8.1 Import the existing Tableau export with explicit types
+
+Set `tableau_reference_file` to your existing Tableau data-source CSV.
+The path below is an example; there is no need to move or duplicate the
+file. Use the same working directory as the previous sections.
+
+Keep `source_version` as text even though it looks like a date. Parse the
+two analysis-window fields as dates and the measures as numbers. The
+supplied export uses the literal lowercase `null` for missing percentages,
+so recognize that value as `NA` during import.
+
+```{r import-tableau-reference-mart}
+tableau_reference_file = "../data/exports/mart_susceptibility.csv"
+
+tableau_reference =
+  read_csv(
+    tableau_reference_file,
+    col_types = cols(
+      .default = col_character(),
+      pair_order = col_double(),
+      eligible_count = col_double(),
+      tested_endpoint_count = col_double(),
+      categorized_count = col_double(),
+      susceptible_count = col_double(),
+      resistant_count = col_double(),
+      intermediate_count = col_double(),
+      inconclusive_count = col_double(),
+      synergism_count = col_double(),
+      missing_result_count = col_double(),
+      conflict_result_count = col_double(),
+      untested_count = col_double(),
+      categorized_result_coverage_pct = col_double(),
+      susceptible_pct = col_double(),
+      resistant_pct = col_double(),
+      analysis_window_start = col_date(format = "%Y-%m-%d"),
+      analysis_window_end_exclusive = col_date(format = "%Y-%m-%d")
+    ),
+    na = c("", "null"),
+    trim_ws = FALSE
+  )
+
+reference_parse_problems = problems(tableau_reference)
+
+if (nrow(reference_parse_problems) > 0L) {
+  print(reference_parse_problems, n = 20, width = Inf)
+  stop("Resolve the reference CSV parsing problems before comparing marts.")
+}
+```
+
+### 8.2 Check column names and row identities
+
+Both tables must contain the same column names. The natural row identity
+is `source_version`, `cohort_id`, `organism_reporting_group`,
+`reporting_phenotype`, and `antibiotic`, already stored in `mart_id`.
+Check these fields for missing values and duplicates before joining.
+
+```{r check-mart-comparison-structure}
+column_check = tibble(
+  reference_columns = ncol(tableau_reference),
+  r_columns = ncol(mart_susceptibility_r),
+  same_column_names = setequal(
+    names(tableau_reference),
+    names(mart_susceptibility_r)
+  ),
+  same_column_order = identical(
+    names(tableau_reference),
+    names(mart_susceptibility_r)
+  )
+)
+
+print(column_check, width = Inf)
+
+if (!column_check$same_column_names) {
+  print(list(
+    only_in_reference = setdiff(
+      names(tableau_reference), names(mart_susceptibility_r)
+    ),
+    only_in_r = setdiff(
+      names(mart_susceptibility_r), names(tableau_reference)
+    )
+  ))
+  stop("The R mart and reference CSV have different columns.")
+}
+
+r_keys =
+  mart_susceptibility_r %>%
+  select(all_of(mart_id))
+
+reference_keys =
+  tableau_reference %>%
+  select(all_of(mart_id))
+
+key_check = tibble(
+  dataset = c("R mart", "Tableau CSV"),
+  row_count = c(nrow(r_keys), nrow(reference_keys)),
+  duplicate_key_rows = c(
+    nrow(r_keys) - nrow(distinct(r_keys)),
+    nrow(reference_keys) - nrow(distinct(reference_keys))
+  ),
+  missing_key_rows = c(
+    sum(!complete.cases(r_keys)),
+    sum(!complete.cases(reference_keys))
+  )
+)
+
+print(key_check, width = Inf)
+
+if (any(key_check$duplicate_key_rows > 0L | key_check$missing_key_rows > 0L)) {
+  stop("Resolve missing or duplicate row identities before comparing values.")
+}
+```
+
+### 8.3 Find missing or extra rows
+
+The two `anti_join()` operations identify any row identities present in
+only one table. Both results should have zero rows.
+
+```{r compare-mart-row-populations}
+missing_from_r =
+  reference_keys %>%
+  anti_join(r_keys, by = mart_id, na_matches = "never")
+
+extra_in_r =
+  r_keys %>%
+  anti_join(reference_keys, by = mart_id, na_matches = "never")
+
+print(missing_from_r, n = 20, width = Inf)
+print(extra_in_r, n = 20, width = Inf)
+```
+
+### 8.4 Compare every remaining field
+
+Convert the values to a common text representation after numbers and
+dates have been parsed. This allows different field types to appear in
+one long comparison table. Numeric values such as `100` and `100.0`
+compare equally; dates use their ISO representation. Text values retain
+their spelling and whitespace.
+
+The join compares fields only for matching row identities. Missing and
+extra rows are checked separately above. Two missing values match, while
+a missing value on only one side is a difference.
+
+```{r compare-all-mart-field-values}
+value_columns = setdiff(names(tableau_reference), mart_id)
+
+r_values =
+  mart_susceptibility_r %>%
+  mutate(
+    across(where(is.numeric), as.double),
+    across(all_of(value_columns), as.character)
+  ) %>%
+  pivot_longer(
+    cols = all_of(value_columns),
+    names_to = "field",
+    values_to = "r_value"
+  )
+
+reference_values =
+  tableau_reference %>%
+  mutate(across(all_of(value_columns), as.character)) %>%
+  pivot_longer(
+    cols = all_of(value_columns),
+    names_to = "field",
+    values_to = "reference_value"
+  )
+
+field_comparison =
+  r_values %>%
+  inner_join(
+    reference_values,
+    by = c(mart_id, "field"),
+    na_matches = "never",
+    relationship = "one-to-one"
+  ) %>%
+  mutate(
+    values_match =
+      coalesce(r_value == reference_value, FALSE) |
+      (is.na(r_value) & is.na(reference_value))
+  )
+
+field_differences =
+  field_comparison %>%
+  filter(!values_match) %>%
+  select(all_of(mart_id), field, r_value, reference_value)
+
+comparison_check = tibble(
+  reference_rows = nrow(tableau_reference),
+  r_rows = nrow(mart_susceptibility_r),
+  missing_from_r = nrow(missing_from_r),
+  extra_in_r = nrow(extra_in_r),
+  nonkey_fields_compared = length(value_columns),
+  field_values_compared = nrow(field_comparison),
+  field_mismatches = nrow(field_differences)
+) %>%
+  mutate(
+    matches_reference =
+      missing_from_r == 0L &
+      extra_in_r == 0L &
+      field_mismatches == 0L &
+      reference_rows > 0L
+  )
+
+print(comparison_check, width = Inf)
+print(field_differences, n = 20, width = Inf)
+```
+
+For the supplied CSV, expect 396 rows in both tables, zero missing or
+extra rows, and zero field mismatches. The comparison covers 21 nonkey
+fields across 396 rows: 8,316 field values, in addition to the five
+identifying fields. `matches_reference` should be `TRUE`.
+
+If differences appear, review `field_differences`, `missing_from_r`, and
+`extra_in_r`. The export below stops when the comparison fails.
+
+### 8.5 Export the verified R mart
+
+Write a separate R-generated CSV after the comparison passes. Keep the
+reference column order and use the same lowercase `null` missing-value
+marker as the supplied export. Change `output_file` if you prefer a
+different output folder.
+
+```{r export-verified-r-mart}
+if (!isTRUE(comparison_check$matches_reference)) {
+  stop("The marts differ. Review the comparison results before exporting.")
+}
+
+output_file = "../data/processed/mart_susceptibility_r.csv"
+
+dir.create(dirname(output_file), recursive = TRUE, showWarnings = FALSE)
+
+mart_susceptibility_r %>%
+  select(all_of(names(tableau_reference))) %>%
+  write_csv(output_file, na = "null")
+
+export_check = tibble(
+  output_file = output_file,
+  exported_rows = nrow(mart_susceptibility_r),
+  exported_columns = ncol(mart_susceptibility_r),
+  matches_tableau_reference = comparison_check$matches_reference
+)
+
+print(export_check, width = Inf)
+```
+
+When these checks pass, this R Markdown document demonstrates the
+complete transformation from the original cultures CSV to the same
+cleaned susceptibility mart used by Tableau, using the project's shared
+reference tables and tidyverse transformations.
