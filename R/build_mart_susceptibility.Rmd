@@ -1,6 +1,10 @@
 ---
-title: "ARMD Susceptibility Mart: A Tidyverse Workflow"
-output: html_document
+title: "Build the ARMD Susceptibility Mart with R"
+author: "Brenden Clark"
+output:
+  github_document:
+    toc: true
+    toc_depth: 2
 ---
 
 This report transforms the original ARMD culture data into the cleaned
