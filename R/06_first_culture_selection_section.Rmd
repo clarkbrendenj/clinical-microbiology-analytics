@@ -1,0 +1,339 @@
+## 6. Select the first qualifying culture within each reporting category
+
+Each patient can contribute one first qualifying culture per source
+release, specimen cohort, organism reporting group, and published category.
+Categories are selected independently. A patient can therefore contribute
+to both an ordinary and a resistant category, or to MRSA and MSSA.
+
+Overall *S. aureus* has its own first-culture selection across phenotypes.
+The reporting window was already applied in the previous stage.
+
+### 6.1 Reproduce the deterministic culture ordering
+
+Order cultures by their shifted timestamp. When timestamps tie, the SQL
+uses a hashed culture key to choose consistently. Reproduce that key
+from the same ordered identifiers so that R selects the same culture.
+The hash helper uses the `digest` package. If it is unavailable, install
+it once with `install.packages("digest")` in the console.
+
+This helper will also be reused when creating the final mart key.
+
+```{r create-culture-ordering-keys}
+make_dbt_key = function(data, key_columns) {
+  key_text =
+    data %>%
+    select(all_of(key_columns)) %>%
+    mutate(
+      across(
+        everything(),
+        ~ replace_na(as.character(.x), "_dbt_utils_surrogate_key_null_")
+      )
+    ) %>%
+    unite("key_text", everything(), sep = "-") %>%
+    pull(key_text)
+
+  map_chr(
+    key_text,
+    ~ digest::digest(.x, algo = "md5", serialize = FALSE)
+  )
+}
+
+culture_keys =
+  window_organisms %>%
+  select(all_of(culture_id)) %>%
+  distinct() %>%
+  mutate(
+    culture_key = make_dbt_key(pick(all_of(culture_id)), culture_id)
+  )
+
+stratified_sources =
+  reporting_cultures %>%
+  left_join(
+    culture_keys,
+    by = culture_id,
+    na_matches = "never",
+    relationship = "many-to-one"
+  ) %>%
+  mutate(source_reporting_phenotype = reporting_phenotype)
+```
+
+### 6.2 Identify eligible MSSA cultures
+
+MSSA requires a `base` *S. aureus* culture with an oxacillin-resistance
+status of `not_detected`, plus susceptible oxacillin or cefoxitin marker
+evidence. All observed marker endpoints must be resolved Susceptible;
+missing, conflicting, Intermediate, or Resistant marker endpoints block
+qualification.
+
+The grouping below starts with observed marker rows, so every resulting
+group contains at least one marker. `all()` then requires every observed
+marker in that group to be resolved Susceptible. A culture with no marker
+endpoint cannot enter this marker table.
+
+```{r identify-mssa-marker-cultures}
+mssa_marker_cultures =
+  stratified_ast %>%
+  filter(
+    organism_reporting_group == "Staphylococcus aureus",
+    reporting_phenotype == "base",
+    antibiotic %in% c("Oxacillin", "Cefoxitin")
+  ) %>%
+  group_by(across(all_of(reporting_culture_id))) %>%
+  summarise(
+    all_observed_markers_susceptible = all(
+      resolution_status == "resolved" &
+      susceptibility %in% "Susceptible"
+    ),
+    .groups = "drop"
+  ) %>%
+  filter(all_observed_markers_susceptible) %>%
+  select(all_of(reporting_culture_id))
+
+mssa_candidates =
+  stratified_sources %>%
+  filter(
+    organism_reporting_group == "Staphylococcus aureus",
+    reporting_phenotype == "base",
+    ast_oxacillin_resistance_status == "not_detected"
+  ) %>%
+  inner_join(
+    mssa_marker_cultures,
+    by = reporting_culture_id,
+    na_matches = "never",
+    relationship = "one-to-one"
+  ) %>%
+  mutate(
+    reporting_phenotype = "oxacillin_susceptible",
+    organism_name = str_c(organism_reporting_group, " — MSSA")
+  )
+```
+
+`source_reporting_phenotype` stays `base` for these MSSA cultures. This
+preserves the link to the correct stratified AST records while publishing
+the category as `oxacillin_susceptible`.
+
+### 6.3 Define the remaining published categories
+
+Include ordinary non-*S. aureus* organisms, ESCE-R observations without
+positive CRE evidence, VRE in the two defined *Enterococcus* species,
+and MRSA in *S. aureus*. CRE and MDR *P. aeruginosa* groups do not enter
+these main susceptibility populations.
+
+```{r create-stratified-reporting-candidates}
+ordinary_candidates =
+  stratified_sources %>%
+  filter(
+    (
+      reporting_phenotype == "base" &
+      organism_reporting_group != "Staphylococcus aureus"
+    ) |
+    (
+      reporting_phenotype == "esce_r" &
+      ast_cre_status != "positive"
+    ) |
+    (
+      reporting_phenotype == "vancomycin_resistant" &
+      organism_reporting_group %in% c(
+        "Enterococcus faecalis",
+        "Enterococcus faecium"
+      )
+    ) |
+    (
+      reporting_phenotype == "oxacillin_resistant" &
+      organism_reporting_group == "Staphylococcus aureus"
+    )
+  ) %>%
+  mutate(
+    organism_name = case_when(
+      reporting_phenotype == "esce_r" ~
+        str_c(organism_reporting_group, " — ESCE-R"),
+      reporting_phenotype == "vancomycin_resistant" ~
+        str_c(organism_reporting_group, " — VRE"),
+      reporting_phenotype == "oxacillin_resistant" ~
+        str_c(organism_reporting_group, " — MRSA"),
+      TRUE ~ organism_reporting_group
+    )
+  )
+
+stratified_candidates =
+  bind_rows(ordinary_candidates, mssa_candidates)
+```
+
+### 6.4 Select first cultures independently within each category
+
+Sort eligible cultures by time and the deterministic culture key, then
+retain the first row in each patient-category group. Each published
+category has at most one candidate row per culture after consolidation,
+so the culture key resolves timestamp ties within that group.
+
+The overall *S. aureus* selection uses all its eligible cultures,
+regardless of MRSA or MSSA qualification.
+
+```{r select-first-reporting-cultures}
+patient_category_id = c(
+  "source_version",
+  "cohort_id",
+  "patient_key",
+  "organism_reporting_group",
+  "reporting_phenotype"
+)
+
+first_stratified =
+  stratified_candidates %>%
+  arrange(culture_time_shifted, culture_key) %>%
+  group_by(across(all_of(patient_category_id))) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+
+first_overall =
+  overall_cultures %>%
+  left_join(
+    culture_keys,
+    by = culture_id,
+    na_matches = "never",
+    relationship = "many-to-one"
+  ) %>%
+  mutate(
+    reporting_phenotype = "overall",
+    source_reporting_phenotype = NA_character_,
+    organism_name = organism_reporting_group
+  ) %>%
+  arrange(culture_time_shifted, culture_key) %>%
+  group_by(across(all_of(patient_category_id))) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+
+selected_cultures =
+  bind_rows(first_stratified, first_overall)
+```
+
+### 6.5 Attach AST for each selected culture and scope
+
+For stratified selections, use the original source phenotype when
+matching AST. This is particularly important for MSSA, whose published
+category differs from its `base` source category. Overall *S. aureus*
+uses the separate overall reconciliation.
+
+Keep `selected_cultures` as the eligible population independently of
+the AST join. A selected culture without an antibiotic endpoint must
+still contribute to the eligible reporting denominator.
+
+```{r attach-selected-culture-ast}
+selected_columns = c(
+  culture_id,
+  "cohort_id",
+  "organism_reporting_group",
+  "reporting_phenotype",
+  "organism_name",
+  "gram_stain_group",
+  "culture_time_shifted",
+  "culture_key"
+)
+
+stratified_join_id = c(
+  culture_id,
+  "cohort_id",
+  "organism_reporting_group",
+  "source_reporting_phenotype"
+)
+
+first_stratified_ast =
+  first_stratified %>%
+  select(all_of(selected_columns), source_reporting_phenotype) %>%
+  inner_join(
+    stratified_ast %>%
+      rename(source_reporting_phenotype = reporting_phenotype),
+    by = stratified_join_id,
+    na_matches = "never",
+    relationship = "one-to-many"
+  )
+
+first_overall_ast =
+  first_overall %>%
+  select(all_of(selected_columns)) %>%
+  inner_join(
+    overall_ast,
+    by = overall_culture_id,
+    na_matches = "never",
+    relationship = "one-to-many"
+  )
+
+selected_ast =
+  bind_rows(first_stratified_ast, first_overall_ast)
+
+selected_culture_id = c(
+  culture_id,
+  "cohort_id",
+  "organism_reporting_group",
+  "reporting_phenotype"
+)
+```
+
+### 6.6 Check selections against the supplied Tableau populations
+
+Review the candidate and selected counts. Then compare the nine
+*S. aureus* category counts against the eligible counts in the supplied
+Tableau CSV. These expected values apply to the current 2025-04-11
+release and 2023 reporting window.
+
+MRSA and MSSA counts need not sum to the overall count because each
+population selects its first culture independently. For example, the
+supplied urine populations contain 22 MRSA, 38 MSSA, and 58 overall
+patient-category observations.
+
+```{r check-first-culture-selections}
+first_selection_check = tibble(
+  population = c(
+    "Stratified candidate cultures",
+    "First stratified cultures",
+    "Overall Staphylococcus aureus candidate cultures",
+    "First overall Staphylococcus aureus cultures"
+  ),
+  record_count = c(
+    nrow(stratified_candidates),
+    nrow(first_stratified),
+    nrow(overall_cultures),
+    nrow(first_overall)
+  )
+)
+
+staph_reference_counts = tribble(
+  ~cohort_id, ~reporting_phenotype, ~expected_count,
+  "blood", "overall", 150L,
+  "blood", "oxacillin_resistant", 59L,
+  "blood", "oxacillin_susceptible", 91L,
+  "respiratory", "overall", 292L,
+  "respiratory", "oxacillin_resistant", 34L,
+  "respiratory", "oxacillin_susceptible", 258L,
+  "urine", "overall", 58L,
+  "urine", "oxacillin_resistant", 22L,
+  "urine", "oxacillin_susceptible", 38L
+)
+
+staph_selection_check =
+  selected_cultures %>%
+  filter(organism_reporting_group == "Staphylococcus aureus") %>%
+  count(cohort_id, reporting_phenotype, name = "selected_count") %>%
+  full_join(
+    staph_reference_counts,
+    by = c("cohort_id", "reporting_phenotype"),
+    relationship = "one-to-one"
+  ) %>%
+  mutate(
+    selected_count = replace_na(selected_count, 0L),
+    matches_reference =
+      !is.na(expected_count) & selected_count == expected_count
+  ) %>%
+  arrange(cohort_id, reporting_phenotype)
+
+print(first_selection_check, width = Inf)
+print(staph_selection_check, n = Inf, width = Inf)
+
+selected_cultures %>%
+  count(cohort_id, reporting_phenotype, name = "selected_culture_count") %>%
+  print(n = Inf)
+```
+
+The next stage will expand the selected populations to approved
+organism-antibiotic pairs, apply scoped exclusions, and calculate the
+final mart's counts, percentages, and display flags.

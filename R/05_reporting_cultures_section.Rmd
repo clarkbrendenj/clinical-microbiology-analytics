@@ -1,0 +1,265 @@
+## 5. Build reporting cultures and reconcile their AST
+
+The source organism observations now have resistance classifications.
+Assign each observation to its reporting category, limit the population
+to the reporting period, and combine source labels that belong to the
+same reporting culture and category.
+
+The overall *S. aureus* population also needs a separate culture-level
+view that combines labels across phenotypes. First-culture selection per
+patient follows in the next stage.
+
+### 5.1 Assign categories and apply the reporting period
+
+Assign the reporting category in the same priority order as the SQL:
+CRE, MDR *P. aeruginosa*, oxacillin resistance, vancomycin resistance,
+ESCE-R, and then `base`. The `base` category means that no positive
+phenotype above took precedence; it does not establish susceptibility
+or exclude incomplete phenotype testing.
+
+Apply the inclusive start and exclusive end dates in UTC. The source
+labels on each culture share the consolidated culture timestamp, so
+filtering them before combining labels preserves the reporting scope.
+
+```{r categorize-and-filter-reporting-observations}
+window_organisms =
+  phenotype_organisms %>%
+  mutate(
+    reporting_phenotype = case_when(
+      ast_cre_status == "positive" ~ "cre",
+      ast_mdr_p_aeruginosa_status == "positive" ~ "mdr_p_aeruginosa",
+      ast_oxacillin_resistance_status == "positive" ~ "oxacillin_resistant",
+      ast_vancomycin_resistance_status == "positive" ~ "vancomycin_resistant",
+      ast_esce_enterobacterales_status == "positive" ~ "esce_r",
+      TRUE ~ "base"
+    )
+  ) %>%
+  filter(
+    !is.na(culture_time_shifted),
+    culture_time_shifted >= as.POSIXct(analysis_window_start, tz = "UTC"),
+    culture_time_shifted < as.POSIXct(
+      analysis_window_end_exclusive,
+      tz = "UTC"
+    )
+  )
+
+reporting_culture_id = c(
+  culture_id,
+  "cohort_id",
+  "organism_reporting_group",
+  "reporting_phenotype"
+)
+
+overall_culture_id = c(
+  culture_id,
+  "cohort_id",
+  "organism_reporting_group"
+)
+```
+
+### 5.2 Combine source labels within the correct reporting scope
+
+When source labels are combined, retain their original names as a list
+for traceability. Combine phenotype evidence using the precedence
+`positive`, `not_evaluable`, `not_detected`, and `not_applicable`.
+
+`reporting_cultures` combines labels only within the same culture,
+organism reporting group, and phenotype. CRE and MDR groups remain
+available here; they will not form main susceptibility-reporting rows.
+
+`overall_cultures` combines all labels for *S. aureus* on the same
+culture, regardless of phenotype.
+
+```{r consolidate-reporting-culture-labels}
+combine_phenotype_status = function(x) {
+  case_when(
+    any(x == "positive") ~ "positive",
+    any(x == "not_evaluable") ~ "not_evaluable",
+    any(x == "not_detected") ~ "not_detected",
+    TRUE ~ "not_applicable"
+  )
+}
+
+reporting_cultures =
+  window_organisms %>%
+  group_by(across(all_of(reporting_culture_id))) %>%
+  summarise(
+    culture_time_shifted = first(culture_time_shifted),
+    gram_stain_group = first(gram_stain_group),
+    source_label_count = n_distinct(organism),
+    source_labels = list(sort(unique(organism))),
+    across(all_of(phenotype_columns), combine_phenotype_status),
+    .groups = "drop"
+  )
+
+overall_cultures =
+  window_organisms %>%
+  filter(organism_reporting_group == "Staphylococcus aureus") %>%
+  group_by(across(all_of(overall_culture_id))) %>%
+  summarise(
+    culture_time_shifted = first(culture_time_shifted),
+    gram_stain_group = first(gram_stain_group),
+    source_label_count = n_distinct(organism),
+    source_labels = list(sort(unique(organism))),
+    source_reporting_phenotypes = list(sort(unique(reporting_phenotype))),
+    across(all_of(phenotype_columns), combine_phenotype_status),
+    .groups = "drop"
+  )
+```
+
+### 5.3 Define a shared reconciliation for reporting-level AST
+
+There are two distinct reconciliation scopes in this project. Stage 2
+resolved repeated values within one original organism label. Here,
+combine those already-reconciled endpoints across source labels within
+a reporting group.
+
+Any source endpoint marked as conflicting keeps the reporting result
+in conflict. Different resolved results also conflict. One consistent
+resolved result can be retained alongside a separate label's missing
+endpoint. An endpoint absent from a label contributes no AST record.
+
+| Endpoints from different source labels | Reporting result |
+|---|---|
+| Resolved Susceptible and resolved Susceptible | Resolved Susceptible |
+| Resolved Susceptible and missing | Resolved Susceptible |
+| Resolved Susceptible and resolved Resistant | Conflict |
+| Any source endpoint already marked conflict | Conflict |
+| Missing endpoints only | Missing |
+
+Define one function so both the stratified and overall populations use
+this reconciliation consistently.
+
+```{r define-reporting-ast-reconciliation}
+reconcile_reporting_ast = function(data, group_columns) {
+  data %>%
+    group_by(across(all_of(c(group_columns, "antibiotic")))) %>%
+    summarise(
+      source_endpoint_count = n(),
+      source_conflict_count = sum(resolution_status == "conflict"),
+      source_missing_count = sum(resolution_status == "missing"),
+      distinct_resolved_result_count = n_distinct(
+        susceptibility[resolution_status == "resolved"],
+        na.rm = TRUE
+      ),
+      candidate_result = first(
+        susceptibility[resolution_status == "resolved"],
+        default = NA_character_
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      resolution_status = case_when(
+        source_conflict_count > 0 | distinct_resolved_result_count > 1 ~
+          "conflict",
+        distinct_resolved_result_count == 1 ~ "resolved",
+        TRUE ~ "missing"
+      ),
+      susceptibility = if_else(
+        resolution_status == "resolved",
+        candidate_result,
+        NA_character_
+      ),
+      reconciliation_reason = case_when(
+        source_conflict_count > 0 ~ "source_endpoint_conflict",
+        distinct_resolved_result_count > 1 ~ "discordant_source_results",
+        distinct_resolved_result_count == 1 & source_missing_count > 0 ~
+          "resolved_with_missing_source_endpoint",
+        distinct_resolved_result_count == 1 ~ "resolved_consistent_result",
+        TRUE ~ "missing_only"
+      )
+    ) %>%
+    select(-candidate_result)
+}
+```
+
+### 5.4 Reconcile AST separately for stratified and overall cultures
+
+Attach the reporting identities to the original endpoints using all
+culture and original-organism keys. This retains each endpoint's link
+to the original label that supplied its phenotype evidence.
+
+For stratified reporting, retain the main susceptibility source
+categories and reconcile within phenotype. MSSA candidates will be
+derived from qualifying `base` *S. aureus* cultures in the next stage.
+For overall *S. aureus*, reconcile across all its labels on the culture.
+
+```{r reconcile-stratified-and-overall-ast}
+window_ast =
+  ast_endpoints %>%
+  inner_join(
+    window_organisms %>%
+      select(
+        all_of(organism_id),
+        cohort_id,
+        organism_reporting_group,
+        reporting_phenotype
+      ),
+    by = organism_id,
+    na_matches = "never",
+    relationship = "many-to-one"
+  )
+
+stratified_ast =
+  window_ast %>%
+  filter(
+    reporting_phenotype %in% c(
+      "base",
+      "esce_r",
+      "oxacillin_resistant",
+      "vancomycin_resistant"
+    )
+  ) %>%
+  reconcile_reporting_ast(reporting_culture_id)
+
+overall_ast =
+  window_ast %>%
+  filter(organism_reporting_group == "Staphylococcus aureus") %>%
+  reconcile_reporting_ast(overall_culture_id)
+```
+
+### 5.5 Inspect the reporting populations and AST statuses
+
+Review the number of source observations in the window, the resulting
+phenotype culture groups, and the separate overall *S. aureus* cultures.
+The overall and stratified views overlap; their counts are not additive
+unique-culture or unique-patient totals.
+
+```{r check-reporting-cultures-and-ast}
+reporting_scope_check = tibble(
+  population = c(
+    "Original organism observations in the reporting window",
+    "Consolidated culture-organism-phenotype groups",
+    "Overall Staphylococcus aureus cultures"
+  ),
+  record_count = c(
+    nrow(window_organisms),
+    nrow(reporting_cultures),
+    nrow(overall_cultures)
+  )
+)
+
+reporting_ast_check =
+  bind_rows(
+    stratified_ast %>%
+      count(resolution_status, name = "endpoint_count") %>%
+      mutate(scope = "stratified"),
+    overall_ast %>%
+      count(resolution_status, name = "endpoint_count") %>%
+      mutate(scope = "overall_s_aureus")
+  ) %>%
+  select(scope, resolution_status, endpoint_count) %>%
+  arrange(scope, resolution_status)
+
+print(reporting_scope_check, width = Inf)
+
+reporting_cultures %>%
+  count(cohort_id, reporting_phenotype, name = "culture_group_count") %>%
+  print(n = Inf)
+
+print(reporting_ast_check, n = Inf)
+```
+
+The next stage will select each patient's first qualifying culture
+independently within each published category, including separate MRSA,
+MSSA, and overall *S. aureus* populations.

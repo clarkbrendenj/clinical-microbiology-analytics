@@ -10,9 +10,8 @@
 
 
 
-<meta name="date" content="2026-10-19" />
 
-<title>clinical_microbiology_analytics</title>
+<title>ARMD Susceptibility Mart: A Tidyverse Workflow</title>
 
 <script>// Pandoc 2.9 adds attributes on both header and div. We remove the former (to
 // be compatible with the behavior of Pandoc < 2.8).
@@ -349,35 +348,20 @@ display: none;
 
 
 
-<h1 class="title toc-ignore">clinical_microbiology_analytics</h1>
-<h4 class="date">2026-10-19</h4>
+<h1 class="title toc-ignore">ARMD Susceptibility Mart: A Tidyverse
+Workflow</h1>
 
 </div>
 
 
-<div id="reproduce-the-armd-tableau-susceptibility-mart-with-tidyverse-transformations." class="section level1">
-<h1>Reproduce the ARMD Tableau susceptibility mart with tidyverse
-transformations.</h1>
-</div>
-<div id="step-1-import-and-stage-the-original-cultures-csv." class="section level1">
-<h1>Step 1: import and stage the original cultures CSV.</h1>
-</div>
-<div id="later-steps-will-be-appended-to-this-same-script-after-inspecting-this-output." class="section level1">
-<h1>Later steps will be appended to this same script after inspecting
-this output.</h1>
-</div>
-<div id="section" class="section level1">
-<h1></h1>
-</div>
-<div id="suggested-repository-location-rbuild_mart_susceptibility.r" class="section level1">
-<h1>Suggested repository location: R/build_mart_susceptibility.R</h1>
-</div>
-<div id="run-from-the-repository-root.-change-raw_data_file-to-your-existing-csv-path" class="section level1">
-<h1>Run from the repository root. Change raw_data_file to your existing
-CSV path;</h1>
-</div>
-<div id="there-is-no-need-to-move-or-duplicate-the-source-data." class="section level1">
-<h1>there is no need to move or duplicate the source data.</h1>
+<p>This report transforms the original ARMD culture data into the
+cleaned susceptibility dataset used by the Tableau dashboard.</p>
+<div id="import-and-stage-the-source-data" class="section level2">
+<h2>1. Import and stage the source data</h2>
+<div id="load-packages-and-define-the-source" class="section level3">
+<h3>1.1 Load packages and define the source</h3>
+<p>Load the required packages and specify the original cultures CSV and
+ARMD release version.</p>
 <pre class="r"><code>library(tidyverse)</code></pre>
 <pre><code>## ── Attaching core tidyverse packages ──────────────────────── tidyverse 2.0.0 ──
 ## ✔ dplyr     1.1.4     ✔ readr     2.1.5
@@ -394,26 +378,19 @@ CSV path;</h1>
 raw_data_file = &quot;../data/raw/microbiology_cultures_cohort.csv&quot;
 source_release = &quot;2025-04-11&quot;</code></pre>
 </div>
-<div id="match-the-scope-recorded-in-the-supplied-tableau-csv." class="section level1">
-<h1>Match the scope recorded in the supplied Tableau CSV.</h1>
-</div>
-<div id="define-these-now-but-apply-the-window-after-resolving-culture-level-fields." class="section level1">
-<h1>Define these now, but apply the window after resolving culture-level
-fields.</h1>
+<div id="define-the-reporting-period" class="section level3">
+<h3>1.2 Define the reporting period</h3>
+<p>Use January 1, 2023 through December 31, 2023 to match the Tableau
+dataset. The reporting window will be applied after resolving
+culture-level fields.</p>
 <pre class="r"><code>analysis_window_start = as.Date(&quot;2023-01-01&quot;)
 analysis_window_end_exclusive = analysis_window_start %m+% months(12)</code></pre>
 </div>
-<div id="import-as-text-so-patientorder-identifiers-are-preserved-and-field-cleaning" class="section level1">
-<h1>Import as text so patient/order identifiers are preserved and field
-cleaning</h1>
-</div>
-<div id="is-explicit.-blank-csv-fields-become-na-the-literal-null-is-handled-below." class="section level1">
-<h1>is explicit. Blank CSV fields become NA; the literal “Null” is
-handled below.</h1>
-</div>
-<div id="do-not-let-read_csv-trim-the-raw-ast-category-before-we-preserve-it." class="section level1">
-<h1>Do not let read_csv trim the raw AST category before we preserve
-it.</h1>
+<div id="import-the-raw-data" class="section level3">
+<h3>1.3 Import the raw data</h3>
+<p>Import all fields as text to preserve identifiers and control data
+types explicitly. Convert blank CSV fields to missing values while
+preserving the original susceptibility text.</p>
 <pre class="r"><code>raw_armd =
   read_csv(
     raw_data_file,
@@ -423,13 +400,11 @@ it.</h1>
   ) %&gt;%
   janitor::clean_names()</code></pre>
 </div>
-<div id="keep-one-row-per-original-source-row.-do-not-drop-missing-ast-records-or" class="section level1">
-<h1>Keep one row per original source row. Do not drop missing AST
-records or</h1>
-</div>
-<div id="deduplicate-yet-those-records-affect-reconciliation-and-reporting-coverage." class="section level1">
-<h1>deduplicate yet: those records affect reconciliation and reporting
-coverage.</h1>
+<div id="clean-and-standardize-fields" class="section level3">
+<h3>1.4 Clean and standardize fields</h3>
+<p>Rename identifiers, parse timestamps, trim text, and handle the
+source’s literal “Null” values. Retain all source rows, including
+records with missing AST results, for subsequent reconciliation.</p>
 <pre class="r"><code>armd_staged =
   raw_armd %&gt;%
   transmute(
@@ -452,17 +427,10 @@ coverage.</h1>
     susceptibility = str_trim(na_if(susceptibility, &quot;Null&quot;))
   )</code></pre>
 </div>
-<div id="inspect-the-first-stage-before-building-the-reporting-population." class="section level1">
-<h1>Inspect the first stage before building the reporting
-population.</h1>
-</div>
-<div id="a-nonzero-timestamp_parse_failures-count-needs-review-before-proceeding." class="section level1">
-<h1>A nonzero timestamp_parse_failures count needs review before
-proceeding.</h1>
-</div>
-<div id="the-dates-are-shifted-research-timestamps-not-verified-clinical-dates." class="section level1">
-<h1>The dates are shifted research timestamps, not verified clinical
-dates.</h1>
+<div id="validate-the-import" class="section level3">
+<h3>1.5 Validate the import</h3>
+<p>Check the row count, timestamp parsing, missing identifiers, and
+specimen categories. ARMD timestamps are shifted research dates.</p>
 <pre class="r"><code>import_check =
   armd_staged %&gt;%
   summarise(
@@ -507,12 +475,383 @@ print(import_check)</code></pre>
 ## 2 BLOOD                435774
 ## 3 RESPIRATORY          288326</code></pre>
 </div>
-<div id="this-is-the-first-stage-only-it-does-not-yet-generate-the-final-mart." class="section level1">
-<h1>This is the first stage only; it does not yet generate the final
-mart.</h1>
 </div>
-<div id="next-resolve-culture-level-fields-and-repeated-ast-endpoints." class="section level1">
-<h1>Next: resolve culture-level fields and repeated AST endpoints.</h1>
+<div id="consolidate-culture-records-and-reconcile-ast-results" class="section level2">
+<h2>2. Consolidate culture records and reconcile AST results</h2>
+<p>The source contains repeated culture details across organism and
+antibiotic rows. Create one record per culture, retain the original
+organism labels, and reconcile each organism-antibiotic endpoint before
+applying organism mappings or resistance classifications.</p>
+<div id="create-one-record-per-culture" class="section level3">
+<h3>2.1 Create one record per culture</h3>
+<p>A culture is identified by its source release, patient, encounter,
+and order. For each culture, retain an order-level field only when its
+source values agree. If a field contains different values, including a
+mixture of a value and missing data, set that field to missing and flag
+the culture for review. The flag identifies a conflict; it does not
+automatically exclude the culture.</p>
+<pre class="r"><code>culture_id = c(
+  &quot;source_version&quot;,
+  &quot;patient_key&quot;,
+  &quot;encounter_key&quot;,
+  &quot;culture_order_key&quot;
+)
+
+organism_id = c(culture_id, &quot;organism&quot;)
+
+cultures =
+  armd_staged %&gt;%
+  group_by(across(all_of(culture_id))) %&gt;%
+  summarise(
+    source_row_count = n(),
+    has_order_level_conflict = n_distinct(
+      culture_time_shifted,
+      ordering_mode,
+      culture_description,
+      was_positive
+    ) &gt; 1,
+    across(
+      c(
+        culture_time_shifted,
+        ordering_mode,
+        culture_description,
+        was_positive
+      ),
+      ~ if (n_distinct(.x) == 1) first(.x) else .x[NA_integer_]
+    ),
+    .groups = &quot;drop&quot;
+  ) %&gt;%
+  mutate(
+    cohort_id = case_when(
+      culture_description == &quot;BLOOD&quot; ~ &quot;blood&quot;,
+      culture_description == &quot;URINE&quot; ~ &quot;urine&quot;,
+      culture_description == &quot;RESPIRATORY&quot; ~ &quot;respiratory&quot;,
+      TRUE ~ NA_character_
+    )
+  )</code></pre>
+<p><code>across()</code> applies the same consistency check to each of
+the four culture fields. In the conflicting case,
+<code>.x[NA_integer_]</code> returns a missing value with the field’s
+original type, preserving date-time, character, and integer types.
+<code>n_distinct()</code> includes missing values in its count by
+default.</p>
+</div>
+<div id="retain-the-original-organism-observations" class="section level3">
+<h3>2.2 Retain the original organism observations</h3>
+<p>Create one record per culture and original organism label, then
+attach the consolidated culture details. These represent source organism
+observations; ARMD does not supply verified biological isolate
+identifiers. The explicit join keys prevent unrelated columns from
+affecting the match.</p>
+<pre class="r"><code>culture_organisms =
+  armd_staged %&gt;%
+  filter(!is.na(organism)) %&gt;%
+  select(all_of(organism_id)) %&gt;%
+  distinct() %&gt;%
+  inner_join(
+    cultures,
+    by = culture_id,
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-one&quot;
+  )</code></pre>
+<p><code>na_matches = &quot;never&quot;</code> prevents missing identifiers from
+matching one another, consistent with the existing SQL joins.
+<code>relationship = &quot;many-to-one&quot;</code> requires each organism
+observation to match at most one culture record.</p>
+</div>
+<div id="reconcile-repeated-ast-results" class="section level3">
+<h3>2.3 Reconcile repeated AST results</h3>
+<p>Group antibiotic records within each culture and original organism
+label. Repeated identical results resolve to one result. Different
+results, including a valid result combined with a missing value, remain
+conflicts. An endpoint containing only missing values retains a missing
+status.</p>
+<table>
+<thead>
+<tr class="header">
+<th>Source values within an endpoint</th>
+<th>Status</th>
+<th>Retained result</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Susceptible, Susceptible</td>
+<td>resolved</td>
+<td>Susceptible</td>
+</tr>
+<tr class="even">
+<td>Susceptible, Resistant</td>
+<td>conflict</td>
+<td>Missing</td>
+</tr>
+<tr class="odd">
+<td>Susceptible, missing</td>
+<td>conflict</td>
+<td>Missing</td>
+</tr>
+<tr class="even">
+<td>Missing, missing</td>
+<td>missing</td>
+<td>Missing</td>
+</tr>
+</tbody>
+</table>
+<p>Rows without an antibiotic name do not define an AST endpoint. They
+remain represented in the culture and organism data frames above.</p>
+<pre class="r"><code>ast_endpoints =
+  armd_staged %&gt;%
+  filter(
+    !is.na(organism),
+    !is.na(antibiotic)
+  ) %&gt;%
+  group_by(across(all_of(c(organism_id, &quot;antibiotic&quot;)))) %&gt;%
+  summarise(
+    source_result_rows = n(),
+    missing_result_rows = sum(is.na(susceptibility)),
+    result_state_count = n_distinct(susceptibility),
+    candidate_result = first(susceptibility),
+    .groups = &quot;drop&quot;
+  ) %&gt;%
+  mutate(
+    resolution_status = case_when(
+      result_state_count &gt; 1 ~ &quot;conflict&quot;,
+      is.na(candidate_result) ~ &quot;missing&quot;,
+      TRUE ~ &quot;resolved&quot;
+    ),
+    susceptibility = if_else(
+      resolution_status == &quot;resolved&quot;,
+      candidate_result,
+      NA_character_
+    ),
+    repeated_result_rows = source_result_rows - result_state_count
+  ) %&gt;%
+  select(-candidate_result) %&gt;%
+  semi_join(
+    culture_organisms,
+    by = organism_id,
+    na_matches = &quot;never&quot;
+  )</code></pre>
+<p>The candidate result is retained only when all source values agree,
+so the resolved output is independent of source row order. The
+<code>semi_join()</code> keeps endpoints linked to an existing organism
+observation without adding columns or multiplying rows.</p>
+</div>
+<div id="inspect-culture-and-ast-summaries" class="section level3">
+<h3>2.4 Inspect culture and AST summaries</h3>
+<p>Check how many cultures have conflicting fields, whether encounter
+identifiers are missing, and how many AST endpoints are resolved,
+missing, or conflicting. The source row total in
+<code>culture_check</code> should match the imported 2,241,050 rows.
+Culture counts are expected to be smaller because each source culture
+may have many organism and antibiotic rows.</p>
+<pre class="r"><code>culture_check =
+  cultures %&gt;%
+  summarise(
+    culture_count = n(),
+    source_rows_accounted_for = sum(source_row_count),
+    cultures_with_conflicting_fields = sum(has_order_level_conflict),
+    missing_encounter_keys = sum(is.na(encounter_key)),
+    missing_culture_times = sum(is.na(culture_time_shifted))
+  )
+
+ast_check =
+  ast_endpoints %&gt;%
+  count(resolution_status, name = &quot;endpoint_count&quot;)
+
+print(culture_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 5
+##   culture_count source_rows_accounted_for cultures_with_conflicting_fields
+##           &lt;int&gt;                     &lt;int&gt;                            &lt;int&gt;
+## 1        751075                   2241050                                0
+##   missing_encounter_keys missing_culture_times
+##                    &lt;int&gt;                 &lt;int&gt;
+## 1                      0                     0</code></pre>
+<pre class="r"><code>print(ast_check)</code></pre>
+<pre><code>## # A tibble: 3 × 2
+##   resolution_status endpoint_count
+##   &lt;chr&gt;                      &lt;int&gt;
+## 1 conflict                    9047
+## 2 missing                     1991
+## 3 resolved                 1588327</code></pre>
+<pre class="r"><code>culture_organisms %&gt;%
+  count(cohort_id, name = &quot;culture_organism_count&quot;, sort = TRUE) %&gt;%
+  print(n = Inf)</code></pre>
+<pre><code>## # A tibble: 3 × 2
+##   cohort_id   culture_organism_count
+##   &lt;chr&gt;                        &lt;int&gt;
+## 1 urine                        97184
+## 2 respiratory                  22411
+## 3 blood                        13651</code></pre>
+<p>The resulting <code>cultures</code>, <code>culture_organisms</code>,
+and <code>ast_endpoints</code> data frames will support organism mapping
+and phenotype classification in the next stage. ## 3. Apply reviewed
+organism mappings</p>
+<p>The source may describe the same organism using several labels,
+including older names and resistance or morphotype qualifiers. Join the
+existing dbt reference tables to attach standardized identities and
+reporting groups. Using the same reference files keeps the R and SQL
+reporting definitions aligned.</p>
+<p>Retain the original <code>organism</code> field and one record per
+original source label on each culture. Resistance will be evaluated for
+those observations before labels are consolidated into reporting
+populations.</p>
+</div>
+<div id="load-the-organism-reference-tables" class="section level3">
+<h3>3.1 Load the organism reference tables</h3>
+<p>Use the organism dictionary and Gram classification CSVs already
+stored in <code>dbt/seeds/</code>. The relative path below assumes the
+same working directory as your existing <code>../data/raw/</code> path.
+Change <code>seed_dir</code> if necessary.</p>
+<pre class="r"><code>seed_dir = &quot;../dbt/seeds&quot;
+
+organism_mapping =
+  read_csv(
+    file.path(seed_dir, &quot;organism_mapping.csv&quot;),
+    col_types = cols(
+      .default = col_character(),
+      include_primary_summary = col_integer()
+    ),
+    na = &quot;&quot;,
+    trim_ws = FALSE
+  ) %&gt;%
+  mutate(
+    across(
+      c(organism_reporting_group, source_qualifier),
+      ~ na_if(str_trim(.x), &quot;&quot;)
+    ),
+    has_reviewed_mapping = TRUE
+  )
+
+organism_reporting_groups =
+  read_csv(
+    file.path(seed_dir, &quot;organism_reporting_groups.csv&quot;),
+    col_types = cols(.default = col_character()),
+    na = &quot;&quot;,
+    trim_ws = FALSE
+  )</code></pre>
+<p><code>organism_standardized</code> identifies the reviewed organism
+name. <code>organism_reporting_group</code> identifies the group used in
+the final report; for example, related source identifications can share
+a reporting complex. <code>source_qualifier</code> retains information
+such as a source MRSA designation. Those source qualifiers remain
+traceable, but AST evidence will determine the resistance
+classifications used by this pipeline.</p>
+</div>
+<div id="attach-standardized-identities-and-gram-groups" class="section level3">
+<h3>3.2 Attach standardized identities and Gram groups</h3>
+<p>Match each original organism label exactly to the dictionary, then
+attach the reporting group’s Gram classification. The
+<code>left_join()</code> operations retain unmatched observations for
+review. Each reference table must supply at most one match, preventing
+the joins from multiplying records.</p>
+<pre class="r"><code>mapped_organisms =
+  culture_organisms %&gt;%
+  filter(!is.na(cohort_id)) %&gt;%
+  left_join(
+    organism_mapping,
+    by = c(&quot;organism&quot; = &quot;organism_source&quot;),
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-one&quot;
+  ) %&gt;%
+  mutate(
+    has_reviewed_mapping = coalesce(has_reviewed_mapping, FALSE),
+    mapping_status = if_else(
+      has_reviewed_mapping,
+      mapping_status,
+      &quot;unmapped&quot;
+    ),
+    include_primary_summary = coalesce(include_primary_summary, 0L)
+  ) %&gt;%
+  left_join(
+    organism_reporting_groups,
+    by = &quot;organism_reporting_group&quot;,
+    na_matches = &quot;never&quot;,
+    relationship = &quot;many-to-one&quot;
+  )</code></pre>
+<p><code>has_reviewed_mapping</code> indicates whether the source label
+matched the dictionary. The <code>include_primary_summary</code> flag
+records the reference table’s reporting policy; it does not yet
+determine the final patient population. No organism observations are
+consolidated at this stage.</p>
+</div>
+<div id="review-mapping-coverage" class="section level3">
+<h3>3.3 Review mapping coverage</h3>
+<p>The previous stage contained 133,246 culture-organism observations
+across the three cohorts. This mapping step should retain that count.
+Review the unmatched labels and the records enabled for primary
+reporting that lack a Gram classification. An unmatched label may be
+outside the intended report scope; review its identity and reporting
+purpose before extending the dictionary.</p>
+<pre class="r"><code>mapping_check =
+  mapped_organisms %&gt;%
+  summarise(
+    culture_organism_records = n(),
+    distinct_source_labels = n_distinct(organism),
+    matched_records = sum(has_reviewed_mapping),
+    unmapped_records = sum(!has_reviewed_mapping),
+    primary_reporting_records = sum(include_primary_summary == 1L),
+    primary_records_missing_gram = sum(
+      include_primary_summary == 1L &amp; is.na(gram_stain_group)
+    )
+  )
+
+unmapped_labels =
+  mapped_organisms %&gt;%
+  filter(!has_reviewed_mapping) %&gt;%
+  count(organism, name = &quot;culture_organism_count&quot;, sort = TRUE)
+
+print(mapping_check, width = Inf)</code></pre>
+<pre><code>## # A tibble: 1 × 6
+##   culture_organism_records distinct_source_labels matched_records
+##                      &lt;int&gt;                  &lt;int&gt;           &lt;int&gt;
+## 1                   133246                    314          126405
+##   unmapped_records primary_reporting_records primary_records_missing_gram
+##              &lt;int&gt;                     &lt;int&gt;                        &lt;int&gt;
+## 1             6841                    126405                            0</code></pre>
+<pre class="r"><code>print(unmapped_labels, n = 20)</code></pre>
+<pre><code>## # A tibble: 273 × 2
+##    organism                               culture_organism_count
+##    &lt;chr&gt;                                                   &lt;int&gt;
+##  1 MYCOBACTERIUM AVIUM COMPLEX                               799
+##  2 ACHROMOBACTER XYLOSOXIDANS                                489
+##  3 STREPTOCOCCUS ANGINOSUS GROUP                             314
+##  4 STREPTOCOCCUS MITIS GROUP                                 269
+##  5 MYCOBACTERIUM ABSCESSUS                                   164
+##  6 ACINETOBACTER SPECIES                                     152
+##  7 CORYNEBACTERIUM PROPINQUUM                                141
+##  8 PROTEUS VULGARIS GROUP                                    137
+##  9 STAPHYLOCOCCUS LUGDUNENSIS                                130
+## 10 CORYNEBACTERIUM PSEUDODIPHTHERITICUM                      128
+## 11 VIRIDANS GROUP STREPTOCOCCI                               126
+## 12 STREPTOCOCCUS PYOGENES (GROUP A)                          122
+## 13 PROVIDENCIA RETTGERI                                      109
+## 14 MYCOBACTERIUM CHELONAE                                    105
+## 15 ACINETOBACTER BAUMANNII COMPLEX                            96
+## 16 BACTEROIDES FRAGILIS                                       96
+## 17 STREPTOCOCCUS DYSGALACTIAE                                 85
+## 18 PSEUDOMONAS SPECIES - NOT P.AERUGINOSA                     83
+## 19 CORYNEBACTERIUM SPECIES                                    82
+## 20 PROVIDENCIA STUARTII                                       73
+## # ℹ 253 more rows</code></pre>
+<pre class="r"><code>mapped_organisms %&gt;%
+  count(
+    mapping_status,
+    include_primary_summary,
+    name = &quot;culture_organism_count&quot;,
+    sort = TRUE
+  ) %&gt;%
+  print(n = Inf)</code></pre>
+<pre><code>## # A tibble: 2 × 3
+##   mapping_status include_primary_summary culture_organism_count
+##   &lt;chr&gt;                            &lt;int&gt;                  &lt;int&gt;
+## 1 reviewed                             1                 126405
+## 2 unmapped                             0                   6841</code></pre>
+<p>The resulting <code>mapped_organisms</code> data frame retains the
+culture identifiers and original labels alongside standardized organism
+information. The next stage will combine these observations with
+<code>ast_endpoints</code> to evaluate resistance phenotypes.</p>
+</div>
 </div>
 
 

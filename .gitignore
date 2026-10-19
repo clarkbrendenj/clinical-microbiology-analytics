@@ -58,3 +58,6 @@ databricks.yml
 /notebooks/README.md
 /notebooks/pipeline validation/README.md
 .Rproj.user
+
+# R
+*.Rproj

@@ -1,0 +1,359 @@
+## 4. Classify resistance phenotypes from AST evidence
+
+Use the reconciled antibiotic results to evaluate CRE, extended-spectrum
+cephalosporin resistance (ESCE-R), oxacillin resistance in *S. aureus*,
+vancomycin resistance in *E. faecalis* and *E. faecium*, and multidrug
+resistance in *P. aeruginosa*. The rules below reproduce the existing
+project's definitions using a small drug lookup and shared transformations.
+
+The classification remains at the culture and original organism-label
+level. Source name qualifiers remain available for tracing records; the
+resistance classifications use AST evidence.
+
+### 4.1 Select the reviewed reporting scope and identify applicable rules
+
+The SQL applies its reviewed reporting-scope filter after classification.
+Here, apply the same filter first: classification uses each original
+organism observation independently, so the excluded observations cannot
+change the retained observations' evidence. The 6,841 unmatched observations
+remain available in `mapped_organisms` and `unmapped_labels` for review.
+
+For the supplied dictionary's 41 source labels, eligibility based on
+standardized identities agrees with the SQL's standardized-name and
+source-label fallback checks. This lets the R code use the standardized
+identities directly. Recheck this equivalence if the dictionary is extended.
+
+```{r identify-phenotype-rule-eligibility}
+library(tidyverse)
+library(lubridate)
+
+organism_scope =
+  mapped_organisms %>%
+  filter(
+    include_primary_summary == 1L,
+    mapping_status == "reviewed",
+    !is.na(organism_reporting_group)
+  ) %>%
+  mutate(
+    standardized_name = coalesce(organism_standardized, ""),
+    cre_standard =
+      str_detect(
+        standardized_name,
+        "^(Citrobacter |Enterobacter |Klebsiella )"
+      ) |
+      standardized_name %in% c("Escherichia coli", "Serratia marcescens"),
+    cre_proteus_morganella =
+      str_starts(standardized_name, "Proteus ") |
+      standardized_name == "Morganella morganii",
+    esce =
+      standardized_name %in% c(
+        "Escherichia coli",
+        "Klebsiella aerogenes",
+        "Klebsiella oxytoca",
+        "Klebsiella pneumoniae"
+      ) |
+      str_starts(standardized_name, "Enterobacter "),
+    oxacillin = standardized_name == "Staphylococcus aureus",
+    vre = standardized_name %in% c(
+      "Enterococcus faecalis",
+      "Enterococcus faecium"
+    ),
+    mdr = standardized_name == "Pseudomonas aeruginosa"
+  ) %>%
+  select(-standardized_name)
+
+rule_eligibility =
+  organism_scope %>%
+  select(
+    all_of(organism_id),
+    cre_standard,
+    cre_proteus_morganella,
+    esce,
+    oxacillin,
+    vre,
+    mdr
+  ) %>%
+  pivot_longer(
+    cols = -all_of(organism_id),
+    names_to = "rule",
+    values_to = "eligible"
+  ) %>%
+  filter(eligible) %>%
+  select(-eligible)
+```
+
+### 4.2 Define the antibiotics used by each rule
+
+Each lookup row describes one rule and antimicrobial category. The pipe
+character separates drug names within the compact definition;
+`separate_longer_delim()` turns them into one row per antibiotic.
+
+The Proteus/Morganella CRE panel excludes imipenem-based evidence. The
+MDR *P. aeruginosa* definition evaluates six categories; its aminoglycoside
+category uses tobramycin alone, matching the project's SQL.
+
+```{r define-phenotype-antibiotic-panels}
+phenotype_panels =
+  tribble(
+    ~rule, ~category, ~antibiotic,
+    "cre_standard", "cre",
+    "Ertapenem|Imipenem|Meropenem|Meropenem/Vaborbactam|Imipenem/Relebactam",
+    "cre_proteus_morganella", "cre",
+    "Ertapenem|Meropenem|Meropenem/Vaborbactam",
+    "esce", "esce",
+    "Cefepime|Ceftriaxone|Cefotaxime|Ceftazidime|Ceftazidime/Avibactam|Ceftolozane/Tazobactam",
+    "oxacillin", "oxacillin",
+    "Oxacillin|Cefoxitin",
+    "vre", "vre",
+    "Vancomycin",
+    "mdr", "es_ceph",
+    "Cefepime|Ceftazidime|Ceftazidime/Avibactam|Ceftolozane/Tazobactam",
+    "mdr", "fluoroquinolone",
+    "Ciprofloxacin|Levofloxacin",
+    "mdr", "aminoglycoside",
+    "Tobramycin",
+    "mdr", "carbapenem",
+    "Imipenem|Meropenem|Imipenem/Relebactam",
+    "mdr", "piperacillin_tazobactam",
+    "Piperacillin/Tazobactam",
+    "mdr", "cefiderocol",
+    "Cefiderocol"
+  ) %>%
+  separate_longer_delim(antibiotic, delim = "|")
+```
+
+### 4.3 Summarize the observed AST evidence
+
+Attach the applicable rules to observed antibiotic endpoints. Some drugs
+contribute to more than one rule, so the first join intentionally permits
+multiple matches in both tables. The second join keeps only rules that
+apply to the specific original organism observation.
+
+A categorized endpoint must be resolved and contain Susceptible,
+Intermediate, or Resistant. Resistant is positive evidence for the CRE,
+ESCE-R, oxacillin, and vancomycin rules. Both Intermediate and Resistant
+are positive evidence for the MDR rule.
+
+```{r summarize-phenotype-ast-evidence}
+rule_evidence =
+  ast_endpoints %>%
+  inner_join(
+    phenotype_panels,
+    by = "antibiotic",
+    relationship = "many-to-many"
+  ) %>%
+  inner_join(
+    rule_eligibility,
+    by = c(organism_id, "rule"),
+    na_matches = "never",
+    relationship = "many-to-one"
+  ) %>%
+  mutate(
+    is_categorized =
+      resolution_status == "resolved" &
+      susceptibility %in% c("Susceptible", "Intermediate", "Resistant"),
+    is_positive = if_else(
+      rule == "mdr",
+      susceptibility %in% c("Intermediate", "Resistant"),
+      susceptibility %in% "Resistant"
+    )
+  ) %>%
+  group_by(across(all_of(c(organism_id, "rule", "category")))) %>%
+  summarise(
+    observed_endpoint_count = n(),
+    positive_count = sum(is_categorized & is_positive),
+    nonpositive_count = sum(is_categorized & !is_positive),
+    invalid_count = sum(!is_categorized),
+    .groups = "drop"
+  )
+```
+
+This summarizes observed endpoints only. An untested drug is not
+automatically an invalid result. Antibiotics outside these phenotype
+panels remain in `ast_endpoints` for susceptibility reporting later.
+
+### 4.4 Assign an evidence status to each applicable category
+
+Create each required rule/category combination, including the six MDR
+categories. Categories with no observed endpoints become `not_tested`.
+Positive evidence takes precedence over invalid results; otherwise,
+invalid results take precedence over observed nonpositive evidence.
+
+```{r classify-phenotype-categories}
+required_categories =
+  phenotype_panels %>%
+  distinct(rule, category)
+
+phenotype_category_status =
+  rule_eligibility %>%
+  inner_join(
+    required_categories,
+    by = "rule",
+    relationship = "many-to-many"
+  ) %>%
+  left_join(
+    rule_evidence,
+    by = c(organism_id, "rule", "category"),
+    na_matches = "never",
+    relationship = "one-to-one"
+  ) %>%
+  mutate(
+    across(
+      c(
+        observed_endpoint_count,
+        positive_count,
+        nonpositive_count,
+        invalid_count
+      ),
+      ~ replace_na(.x, 0L)
+    ),
+    category_status = case_when(
+      positive_count > 0 ~ "positive",
+      invalid_count > 0 ~ "not_evaluable",
+      nonpositive_count > 0 ~ "observed_non_positive",
+      TRUE ~ "not_tested"
+    )
+  )
+```
+
+### 4.5 Derive the five phenotype classifications
+
+For the four single-panel phenotypes, positive evidence produces a
+positive classification. Observed nonpositive evidence without invalid
+endpoints produces `not_detected`. Invalid evidence or no usable testing
+produces `not_evaluable`.
+
+For MDR *P. aeruginosa*, at least three positive categories establish
+positive evidence. If the positive and unknown categories together cannot
+reach three, classify the observation as `not_detected`. Otherwise, retain
+`not_evaluable`. Unknown categories include both invalid and untested
+categories.
+
+```{r derive-phenotype-classifications}
+ordinary_phenotype_status =
+  phenotype_category_status %>%
+  filter(rule != "mdr") %>%
+  transmute(
+    across(all_of(organism_id)),
+    phenotype = case_when(
+      category == "cre" ~ "ast_cre_status",
+      category == "esce" ~ "ast_esce_enterobacterales_status",
+      category == "oxacillin" ~ "ast_oxacillin_resistance_status",
+      category == "vre" ~ "ast_vancomycin_resistance_status"
+    ),
+    status = case_when(
+      category_status == "positive" ~ "positive",
+      category_status == "observed_non_positive" ~ "not_detected",
+      TRUE ~ "not_evaluable"
+    )
+  )
+
+mdr_summary =
+  phenotype_category_status %>%
+  filter(rule == "mdr") %>%
+  group_by(across(all_of(organism_id))) %>%
+  summarise(
+    mdr_positive_category_count = sum(category_status == "positive"),
+    mdr_unknown_category_count = sum(
+      category_status %in% c("not_evaluable", "not_tested")
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ast_mdr_p_aeruginosa_status = case_when(
+      mdr_positive_category_count >= 3 ~ "positive",
+      mdr_positive_category_count + mdr_unknown_category_count < 3 ~
+        "not_detected",
+      TRUE ~ "not_evaluable"
+    )
+  )
+
+phenotype_columns = c(
+  "ast_cre_status",
+  "ast_esce_enterobacterales_status",
+  "ast_oxacillin_resistance_status",
+  "ast_vancomycin_resistance_status",
+  "ast_mdr_p_aeruginosa_status"
+)
+
+phenotype_status =
+  bind_rows(
+    ordinary_phenotype_status,
+    mdr_summary %>%
+      transmute(
+        across(all_of(organism_id)),
+        phenotype = "ast_mdr_p_aeruginosa_status",
+        status = ast_mdr_p_aeruginosa_status
+      )
+  ) %>%
+  mutate(phenotype = factor(phenotype, levels = phenotype_columns)) %>%
+  pivot_wider(
+    id_cols = all_of(organism_id),
+    names_from = phenotype,
+    values_from = status,
+    names_expand = TRUE,
+    values_fill = "not_applicable"
+  )
+
+phenotype_organisms =
+  organism_scope %>%
+  left_join(
+    phenotype_status,
+    by = organism_id,
+    na_matches = "never",
+    relationship = "one-to-one"
+  ) %>%
+  mutate(
+    across(
+      all_of(phenotype_columns),
+      ~ replace_na(.x, "not_applicable")
+    )
+  )
+```
+
+An organism outside a rule's scope receives `not_applicable`. Keeping
+`not_detected`, `not_evaluable`, and `not_applicable` separate prevents
+incomplete or irrelevant testing from being interpreted as negative
+evidence.
+
+### 4.6 Review the phenotype counts
+
+Expect 126,405 culture-organism observations after applying the existing
+reviewed reporting scope. Each should have five nonmissing status fields.
+These remain culture-level source observations, before reporting-window
+selection, label consolidation, or first-culture selection per patient.
+
+```{r check-phenotype-classifications}
+phenotype_population_check =
+  phenotype_organisms %>%
+  summarise(
+    culture_organism_records = n(),
+    distinct_source_labels = n_distinct(organism),
+    missing_status_records = sum(
+      if_any(all_of(phenotype_columns), is.na)
+    )
+  )
+
+phenotype_check =
+  phenotype_organisms %>%
+  select(all_of(phenotype_columns)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "phenotype",
+    values_to = "status"
+  ) %>%
+  count(phenotype, status, name = "culture_organism_count") %>%
+  pivot_wider(
+    names_from = status,
+    values_from = culture_organism_count,
+    values_fill = 0L
+  )
+
+print(phenotype_population_check, width = Inf)
+print(phenotype_check, width = Inf)
+```
+
+The resulting `phenotype_organisms` data frame is ready for assigning
+reporting categories and consolidating labels within the correct scope.
+CRE and MDR classifications are needed here because they determine which
+observations can enter the main susceptibility-reporting populations.
