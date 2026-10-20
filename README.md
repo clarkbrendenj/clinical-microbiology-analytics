@@ -1,7 +1,7 @@
 # Clinical Microbiology Analytics Lakehouse
 
 **A reproducible antibiogram and antimicrobial resistance analytics portfolio project**  
-**Databricks · Delta Lake · SQL · dbt · Python · Tableau Public**
+**Databricks | Delta Lake | SQL | dbt | Python | R | Tableau Public**
 
 [**Explore the interactive antibiogram on Tableau Public**](https://public.tableau.com/views/ARMDAntibiogram/BloodCultureGram-NegativeOrganisms?:language=en-US&publish=yes&:sid=&:redirect=auth&:display_count=n&:origin=viz_share_link)
 
@@ -12,6 +12,8 @@ As a quality management systems specialist / clinical data analyst working in cl
 The clinical data I work with professionally may contain **protected health information (PHI)** and cannot be published in a personal portfolio. Instead, this project uses the publicly available, de-identified **Antibiotic Resistance Microbiology Dataset (ARMD)** to demonstrate similar analytical methods and reporting decisions **without using data from my employer**.
 
 I developed a version-controlled **extract, load, transform (ELT)** pipeline to convert source culture and antimicrobial susceptibility testing (AST) records into two validated reporting datasets: a specimen-stratified susceptibility mart and a multidrug-resistant organism (MDRO) mart. The susceptibility results are visualized as an interactive Tableau Public antibiogram.
+
+I also rebuilt the susceptibility workflow in **R and Python** as a learning exercise and portfolio extension. These implementations demonstrate the same data preparation, reporting logic, and validation across languages, using the dbt-generated dashboard dataset as the comparison reference. See [R and Python implementations](#r-and-python-implementations) for the notebooks and recorded results.
 
 > **Scope:** This is a retrospective research demonstration using source-reported AST categories. It is not an official institutional antibiogram, a fully CLSI M39-compliant implementation, or clinical decision support.
 
@@ -78,8 +80,24 @@ Each tool handles a different part of the analytics lifecycle, allowing data pre
 | **dbt** | Organize SQL transformations into dependency-aware models, with seeds, documentation, and automated tests | Makes specimen definitions, organism terminology, AST reconciliation, and reporting exclusions **explicit, version-controlled, testable, and repeatable**. A changed rule can be reviewed and validated before downstream reports are refreshed. |
 | **Tableau** | Present validated metrics through interactive worksheets and dashboards | Lets microbiology, quality, and antimicrobial stewardship teams explore susceptibility and resistance patterns without reproducing complex transformation logic in each workbook. |
 | **Python + SQL validation notebooks** | Explore source structure, investigate ambiguous records, and independently verify model outputs | Supports reproducible investigation of data-quality issues and documents why modeling and microbiology reporting decisions were made. |
+| **R + Python mart builds** | Rebuild the susceptibility dataset locally from raw ARMD data and the shared dbt reference files | Demonstrates tidyverse and pandas transformations, consistent reporting definitions across tools, and complete comparison with the dashboard dataset. |
 
 **The main architectural advantage is separation of responsibilities:** Databricks manages the analytical data; dbt produces tested, reusable reporting definitions; Tableau visualizes those trusted outputs. This minimizes manual spreadsheet work, reduces duplicated dashboard calculations, and makes it easier to maintain consistent results across multiple stakeholders and reporting products.
+
+## R and Python implementations
+
+I developed these alternative implementations to show how the same analytical problem can be solved with different tools and to demonstrate **R and Python skills alongside Databricks, SQL, and dbt**. The Databricks/dbt project remains the primary ELT pipeline. Each local build starts with the original ARMD cultures CSV and shares the reviewed organism mappings, antibiotic panels, and exclusions in [`dbt/seeds/`](dbt/seeds/).
+
+| Implementation | Portfolio walkthrough | Source | Separate CSV output |
+|---|---|---|---|
+| **R** — tidyverse, lubridate, janitor, digest | [Rendered R report with code and results](R/build_mart_susceptibility.md) | [R Markdown source](R/build_mart_susceptibility.Rmd) | `data/processed/mart_susceptibility_r.csv` |
+| **Python** — pandas, NumPy | [Jupyter notebook with code and results](notebooks/python_build/build_mart_susceptibility.ipynb) | Same notebook | `data/processed/mart_susceptibility_python.csv` |
+
+Both builds reproduce the transformations behind [`mart_susceptibility`](dbt/models/marts/mart_susceptibility.sql): source cleaning, culture consolidation, AST conflict reconciliation, organism mapping, resistance-phenotype classification, first-qualifying-culture selection, reporting exclusions, and susceptibility calculations. The existing `data/exports/mart_susceptibility.csv` used by Tableau is read at the final comparison stage; it does not supply the calculated mart values.
+
+**Recorded validation:** for the `2025-04-11` ARMD release and the shifted-date window `2023-01-01` through `2024-01-01` (exclusive), both saved runs match all **396 row identities and 8,316 values across 21 nonkey fields**, with zero missing rows, extra rows, or field mismatches. Each output has **26 columns**. Equality is checked using parsed values and natural keys, so CSV formatting and row order can differ.
+
+The builds run independently of each other and require no Databricks connection. Each document runs in order within one session; the R source uses paths relative to `R/`, while the Python notebook locates the repository root. These implementations reproduce the susceptibility mart; the separate MDRO mart remains part of the dbt pipeline.
 
 ## Key analytical and modeling decisions
 
@@ -148,7 +166,9 @@ The current project demonstrates window filtering, within-window selection, and 
 | `dbt/seeds/` | Reviewed organism mappings, Gram groups, antibiotic approvals, and exclusions |
 | `dbt/tests/` | Custom data-quality and reporting-policy assertions |
 | `notebooks/source_exploration/` | Source profiling and initial grain assessment |
-| `notebooks/pipeline validation/` | Source profiling and validation history; notebooks 13–14 document the current reporting design and window |
+| [`notebooks/pipeline_validation/`](notebooks/pipeline_validation/) | Source profiling and validation history; notebooks 13-14 document the current reporting design and window |
+| [`R/build_mart_susceptibility.md`](R/build_mart_susceptibility.md) | R implementation with code and recorded results; editable source in [`R/build_mart_susceptibility.Rmd`](R/build_mart_susceptibility.Rmd) |
+| [`notebooks/python_build/build_mart_susceptibility.ipynb`](notebooks/python_build/build_mart_susceptibility.ipynb) | Python implementation with code and recorded results |
 | `dbt/macros/analysis_window.sql` | Inclusive start / exclusive 12-month end and window metadata |
 | `docs/metric_definitions.md` | Detailed metric definitions, methodology, and limitations |
 | [`docs/`](docs/) | Additional project materials, including a **PDF** and a **PowerPoint presentation (`.pptx`)** |
@@ -320,12 +340,12 @@ This is a Databricks-based batch ELT project for the **2025-04-11 ARMD source re
    dbt build
    ```
 
-5. Rerun relevant notebooks in `notebooks/pipeline validation/` in a VS Code notebook environment with a working Databricks connection. Notebook `%sql` cells query Databricks tables directly and do not use dbt's `{{ ref(...) }}` syntax.
+5. Rerun relevant notebooks in [`notebooks/pipeline_validation/`](notebooks/pipeline_validation/) in a VS Code notebook environment with a working Databricks connection. Notebook `%sql` cells query Databricks tables directly and do not use dbt's `{{ ref(...) }}` syntax.
 6. Verify the mart window columns and display coverage in Notebook 13, then export the **current** validated datasets for Tableau Public publication. Include the reporting-window fields and preserve full-release and annual outputs separately. In a governed internal implementation, Tableau could instead query the Databricks marts directly.
 
 ## Skills demonstrated
 
-**Clinical microbiology analytics · ELT pipeline design · Databricks and Delta Lake · SQL data modeling · dbt transformations and testing · Python exploratory analysis · terminology mapping · AST and resistance phenotype interpretation · data-quality validation · Tableau dashboard design**
+**Clinical microbiology analytics | ELT pipeline design | Databricks and Delta Lake | SQL data modeling | dbt transformations and testing | Python/pandas and NumPy | R/tidyverse | cross-language validation | terminology mapping | AST and resistance phenotype interpretation | data-quality validation | Tableau dashboard design**
 
 ### AI assistance
 

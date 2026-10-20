@@ -7,15 +7,21 @@ output:
     toc_depth: 2
 ---
 
-This report transforms the original ARMD culture data into the cleaned
-susceptibility dataset used by the Tableau dashboard.
+This R notebook rebuilds the susceptibility mart produced by the project's Databricks/dbt pipeline from the original ARMD culture data. I developed it as a learning exercise and portfolio extension to demonstrate R data preparation, joins, reusable transformations, resistance-phenotype classification, and validation alongside the [Python notebook](../notebooks/python_build/build_mart_susceptibility.ipynb) and [dbt mart](../dbt/models/marts/mart_susceptibility.sql). The [project README](../README.md) describes the full pipeline and Tableau dashboard.
+
+The R implementation shares the dbt project's reference tables and reporting definitions. It reproduces the transformations in R rather than importing the finished mart as its analytical input; the dbt export is used only for validation. The recorded comparison matched 396 rows and 26 columns, with zero missing or extra rows and zero differences across 8,316 nonkey field values.
+
+**Dependencies and execution:** R with tidyverse, lubridate, janitor, and digest. The `.Rmd` source is rendered with R Markdown to produce the GitHub-readable report. All code paths are relative to the `R/` directory, which is the working directory when knitting this document.
+
+**Inputs:** `data/raw/microbiology_cultures_cohort.csv` (ARMD release `2025-04-11`) and the organism, Gram classification, antibiotic-panel, and exclusion reference tables in `dbt/seeds/`.
+
+**Validation reference:** `data/exports/mart_susceptibility.csv`, the dbt-generated dataset used by Tableau. **Output:** `data/processed/mart_susceptibility_r.csv`. The comparison establishes matching parsed row identities and field values for this release, reporting window, and reference configuration; it does not require identical CSV row ordering or file bytes.
 
 ## 1. Import and stage the source data
 
 ### 1.1 Load packages and define the source
 
-Load the required packages and specify the original cultures CSV and
-ARMD release version.
+The implementation uses tidyverse and lubridate, with janitor and digest called by namespace. The source path and ARMD release identify the input dataset.
 ```{r}
 library(tidyverse)
 library(lubridate)
@@ -25,9 +31,7 @@ source_release = "2025-04-11"
 ```
 ### 1.2 Define the reporting period
 
-Use January 1, 2023 through December 31, 2023 to match the Tableau
-dataset. The reporting window will be applied after resolving
-culture-level fields.
+The reporting period is January 1 through December 31, 2023, matching the Tableau dataset. The window is applied after culture-level fields are reconciled.
 
 ```{r}
 analysis_window_start = as.Date("2023-01-01")
@@ -35,9 +39,7 @@ analysis_window_end_exclusive = analysis_window_start %m+% months(12)
 ```
 ### 1.3 Import the raw data
 
-Import all fields as text to preserve identifiers and control data
-types explicitly. Convert blank CSV fields to missing values while
-preserving the original susceptibility text.
+All source fields are imported as text to preserve identifiers and control subsequent type conversion. Blank CSV fields become missing values, while the original susceptibility text is retained.
 
 ```{r}
 raw_armd =
@@ -52,9 +54,7 @@ raw_armd =
 
 ### 1.4 Clean and standardize fields
 
-Rename identifiers, parse timestamps, trim text, and handle the
-source's literal "Null" values. Retain all source rows, including
-records with missing AST results, for subsequent reconciliation.
+Staging renames identifiers, parses timestamps, trims text, and converts the source's literal "Null" values to missing values. All source rows, including records without AST results, remain available for reconciliation.
 
 ```{r}
 armd_staged =
@@ -82,8 +82,7 @@ armd_staged =
 
 ### 1.5 Validate the import
 
-Check the row count, timestamp parsing, missing identifiers, and
-specimen categories. ARMD timestamps are shifted research dates.
+Import checks summarize row counts, timestamp parsing, missing identifiers, and specimen categories. ARMD timestamps are shifted research dates.
 
 ```{r}
 import_check =
@@ -108,18 +107,11 @@ armd_staged %>%
 ```
 ## 2. Consolidate culture records and reconcile AST results
 
-The source contains repeated culture details across organism and antibiotic
-rows. Create one record per culture, retain the original organism labels,
-and reconcile each organism-antibiotic endpoint before applying organism
-mappings or resistance classifications.
+The source repeats culture details across organism and antibiotic rows. The R pipeline consolidates culture-level fields, preserves the original organism observations, and reconciles each organism-antibiotic endpoint before mapping organisms or classifying resistance.
 
 ### 2.1 Create one record per culture
 
-A culture is identified by its source release, patient, encounter, and order.
-For each culture, retain an order-level field only when its source values
-agree. If a field contains different values, including a mixture of a value
-and missing data, set that field to missing and flag the culture for review.
-The flag identifies a conflict; it does not automatically exclude the culture.
+A culture is identified by source release, patient, encounter, and order. A culture-level field is retained only when all its source values agree. Different values, including a mixture of a value and missing data, produce a missing field and a review flag. The flag records a conflict without automatically excluding the culture.
 
 ```{r consolidate-cultures}
 
@@ -164,17 +156,11 @@ cultures =
   )
 ```
 
-`across()` applies the same consistency check to each of the four culture
-fields. In the conflicting case, `.x[NA_integer_]` returns a missing value
-with the field's original type, preserving date-time, character, and integer
-types. `n_distinct()` includes missing values in its count by default.
+Consistency checks include missing values as distinct states and preserve each field's date-time, character, or integer type when a conflict is replaced with a missing value.
 
 ### 2.2 Retain the original organism observations
 
-Create one record per culture and original organism label, then attach the
-consolidated culture details. These represent source organism observations;
-ARMD does not supply verified biological isolate identifiers. The explicit
-join keys prevent unrelated columns from affecting the match.
+One record per culture and original organism label carries the consolidated culture details. These are source organism observations; ARMD does not supply verified biological isolate identifiers.
 
 ```{r create-culture-organisms}
 culture_organisms =
@@ -190,16 +176,11 @@ culture_organisms =
   )
 ```
 
-`na_matches = "never"` prevents missing identifiers from matching one another,
-consistent with the existing SQL joins. `relationship = "many-to-one"`
-requires each organism observation to match at most one culture record.
+Explicit join keys prevent missing identifiers from matching one another and require each organism observation to match at most one culture record, consistent with the SQL joins.
 
 ### 2.3 Reconcile repeated AST results
 
-Group antibiotic records within each culture and original organism label.
-Repeated identical results resolve to one result. Different results, including
-a valid result combined with a missing value, remain conflicts. An endpoint
-containing only missing values retains a missing status.
+AST endpoints are grouped within each culture and original organism label. Repeated identical results resolve to one result. Different results, including a valid result combined with a missing value, remain conflicts. Endpoints containing only missing values retain a missing status.
 
 | Source values within an endpoint | Status | Retained result |
 |---|---|---|
@@ -247,18 +228,11 @@ ast_endpoints =
   )
 ```
 
-The candidate result is retained only when all source values agree, so the
-resolved output is independent of source row order. The `semi_join()` keeps
-endpoints linked to an existing organism observation without adding columns
-or multiplying rows.
+Only unanimous source results are retained, making reconciliation independent of source row order. Endpoints remain linked to retained organism observations without multiplying rows.
 
 ### 2.4 Inspect culture and AST summaries
 
-Check how many cultures have conflicting fields, whether encounter identifiers
-are missing, and how many AST endpoints are resolved, missing, or conflicting.
-The source row total in `culture_check` should match the imported 2,241,050
-rows. Culture counts are expected to be smaller because each source culture
-may have many organism and antibiotic rows.
+The validation summaries account for all 2,241,050 imported source rows and describe conflicting culture fields, missing encounter identifiers, and AST resolution statuses. Culture counts are smaller than source row counts because one culture can contain multiple organism and antibiotic records.
 
 ```{r check-culture-and-ast-results}
 culture_check =
@@ -283,26 +257,17 @@ culture_organisms %>%
   print(n = Inf)
 ```
 
-The resulting `cultures`, `culture_organisms`, and `ast_endpoints` data frames
-will support organism mapping and phenotype classification in the next stage.
+
 
 ## 3. Apply reviewed organism mappings
 
-The source may describe the same organism using several labels, including
-older names and resistance or morphotype qualifiers. Join the existing dbt
-reference tables to attach standardized identities and reporting groups.
-Using the same reference files keeps the R and SQL reporting definitions
-aligned.
+Shared dbt reference tables standardize older organism names and source labels containing resistance or morphotype qualifiers. Reusing those files aligns the R and SQL reporting definitions.
 
-Retain the original `organism` field and one record per original source
-label on each culture. Resistance will be evaluated for those observations
-before labels are consolidated into reporting populations.
+The original `organism` field and one record per source label on each culture are preserved. Resistance classification precedes consolidation into reporting populations.
 
 ### 3.1 Load the organism reference tables
 
-Use the organism dictionary and Gram classification CSVs already stored in
-`dbt/seeds/`. The relative path below assumes the same working directory as
-your existing `../data/raw/` path. Change `seed_dir` if necessary.
+The organism dictionary and Gram classification tables are loaded from `dbt/seeds/` using paths relative to the `R/` directory.
 
 ```{r load-organism-reference-tables}
 library(tidyverse)
@@ -337,19 +302,11 @@ organism_reporting_groups =
   )
 ```
 
-`organism_standardized` identifies the reviewed organism name.
-`organism_reporting_group` identifies the group used in the final report;
-for example, related source identifications can share a reporting complex.
-`source_qualifier` retains information such as a source MRSA designation.
-Those source qualifiers remain traceable, but AST evidence will determine
-the resistance classifications used by this pipeline.
+`organism_standardized` contains the reviewed organism name, while `organism_reporting_group` defines the final reporting population, such as a complex shared by related source identifications. `source_qualifier` preserves source descriptions such as MRSA for traceability. Resistance classifications are derived from AST evidence rather than those qualifiers.
 
 ### 3.2 Attach standardized identities and Gram groups
 
-Match each original organism label exactly to the dictionary, then attach
-the reporting group's Gram classification. The `left_join()` operations
-retain unmatched observations for review. Each reference table must supply
-at most one match, preventing the joins from multiplying records.
+Exact source-label matches attach standardized identities and reporting-group Gram classifications. Left joins retain unmatched observations, and enforced many-to-one relationships prevent reference tables from multiplying records.
 
 ```{r map-organism-observations}
 mapped_organisms =
@@ -385,12 +342,7 @@ No organism observations are consolidated at this stage.
 
 ### 3.3 Review mapping coverage
 
-The previous stage contained 133,246 culture-organism observations across
-the three cohorts. This mapping step should retain that count. Review the
-unmatched labels and the records enabled for primary reporting that lack a
-Gram classification. An unmatched label may be outside the intended report
-scope; review its identity and reporting purpose before extending the
-dictionary.
+Mapping retains the 133,246 culture-organism observations across the three specimen cohorts. Coverage checks identify unmatched labels and primary-reporting records without Gram classifications. Unmatched labels remain visible for review because some fall outside the intended reporting scope.
 
 ```{r check-organism-mapping}
 mapping_check =
@@ -424,18 +376,11 @@ mapped_organisms %>%
   print(n = Inf)
 ```
 
-The resulting `mapped_organisms` data frame retains the culture identifiers
-and original labels alongside standardized organism information. The next
-stage will combine these observations with `ast_endpoints` to evaluate
-resistance phenotypes.
+`mapped_organisms` preserves culture identifiers and original labels alongside the standardized organism information used for AST-based phenotype classification.
 
 ## 4. Classify resistance phenotypes from AST evidence
 
-Use the reconciled antibiotic results to evaluate CRE, extended-spectrum
-cephalosporin resistance (ESCE-R), oxacillin resistance in *S. aureus*,
-vancomycin resistance in *E. faecalis* and *E. faecium*, and multidrug
-resistance in *P. aeruginosa*. The rules below reproduce the existing
-project's definitions using a small drug lookup and shared transformations.
+Reconciled AST results support the project's definitions of CRE, extended-spectrum cephalosporin resistance (ESCE-R), oxacillin resistance in *S. aureus*, vancomycin resistance in *E. faecalis* and *E. faecium*, and multidrug resistance in *P. aeruginosa*. A compact antibiotic lookup and shared transformations implement the same definitions as the SQL pipeline.
 
 The classification remains at the culture and original organism-label
 level. Source name qualifiers remain available for tracing records; the
@@ -443,16 +388,9 @@ resistance classifications use AST evidence.
 
 ### 4.1 Select the reviewed reporting scope and identify applicable rules
 
-The SQL applies its reviewed reporting-scope filter after classification.
-Here, apply the same filter first: classification uses each original
-organism observation independently, so the excluded observations cannot
-change the retained observations' evidence. The 6,841 unmatched observations
-remain available in `mapped_organisms` and `unmapped_labels` for review.
+The R implementation applies the reviewed reporting-scope filter before classification, while SQL applies it afterward. This preserves the retained observations' evidence because each original organism observation is classified independently. The 6,841 unmatched observations remain available in `mapped_organisms` and `unmapped_labels` for review.
 
-For the supplied dictionary's 41 source labels, eligibility based on
-standardized identities agrees with the SQL's standardized-name and
-source-label fallback checks. This lets the R code use the standardized
-identities directly. Recheck this equivalence if the dictionary is extended.
+For the 41 source labels in this reference dictionary, eligibility based on standardized identities agrees with SQL's standardized-name and source-label fallback checks. R therefore uses standardized identities directly; this equivalence is specific to the dictionary used in this run.
 
 ```{r identify-phenotype-rule-eligibility}
 library(tidyverse)
@@ -515,9 +453,7 @@ rule_eligibility =
 
 ### 4.2 Define the antibiotics used by each rule
 
-Each lookup row describes one rule and antimicrobial category. The pipe
-character separates drug names within the compact definition;
-`separate_longer_delim()` turns them into one row per antibiotic.
+The lookup assigns each antibiotic to its applicable phenotype rule and antimicrobial category.
 
 The Proteus/Morganella CRE panel excludes imipenem-based evidence. The
 MDR *P. aeruginosa* definition evaluates six categories; its aminoglycoside
@@ -555,10 +491,7 @@ phenotype_panels =
 
 ### 4.3 Summarize the observed AST evidence
 
-Attach the applicable rules to observed antibiotic endpoints. Some drugs
-contribute to more than one rule, so the first join intentionally permits
-multiple matches in both tables. The second join keeps only rules that
-apply to the specific original organism observation.
+Observed AST endpoints are joined to applicable rules and restricted to eligible organism observations. A drug may contribute to multiple rules, so the lookup join intentionally supports multiple matches.
 
 A categorized endpoint must be resolved and contain Susceptible,
 Intermediate, or Resistant. Resistant is positive evidence for the CRE,
@@ -605,10 +538,7 @@ panels remain in `ast_endpoints` for susceptibility reporting later.
 
 ### 4.4 Assign an evidence status to each applicable category
 
-Create each required rule/category combination, including the six MDR
-categories. Categories with no observed endpoints become `not_tested`.
-Positive evidence takes precedence over invalid results; otherwise,
-invalid results take precedence over observed nonpositive evidence.
+Each applicable rule/category combination is represented, including all six MDR categories. Categories without observed endpoints receive `not_tested`. Positive evidence takes precedence over invalid results; invalid results otherwise take precedence over observed nonpositive evidence.
 
 ```{r classify-phenotype-categories}
 required_categories =
@@ -654,11 +584,7 @@ positive classification. Observed nonpositive evidence without invalid
 endpoints produces `not_detected`. Invalid evidence or no usable testing
 produces `not_evaluable`.
 
-For MDR *P. aeruginosa*, at least three positive categories establish
-positive evidence. If the positive and unknown categories together cannot
-reach three, classify the observation as `not_detected`. Otherwise, retain
-`not_evaluable`. Unknown categories include both invalid and untested
-categories.
+For MDR *P. aeruginosa*, at least three positive categories establish positive evidence. An observation is `not_detected` when its positive and unknown categories together cannot reach three; otherwise it remains `not_evaluable`. Unknown categories include both invalid and untested evidence.
 
 ```{r derive-phenotype-classifications}
 ordinary_phenotype_status =
@@ -749,10 +675,7 @@ evidence.
 
 ### 4.6 Review the phenotype counts
 
-Expect 126,405 culture-organism observations after applying the existing
-reviewed reporting scope. Each should have five nonmissing status fields.
-These remain culture-level source observations, before reporting-window
-selection, label consolidation, or first-culture selection per patient.
+The recorded run retains 126,405 culture-organism observations in the reviewed reporting scope, each with five nonmissing phenotype statuses. These are source observations before reporting-window selection, label consolidation, and first-culture selection per patient.
 
 ```{r check-phenotype-classifications}
 phenotype_population_check =
@@ -784,33 +707,19 @@ print(phenotype_population_check, width = Inf)
 print(phenotype_check, width = Inf)
 ```
 
-The resulting `phenotype_organisms` data frame is ready for assigning
-reporting categories and consolidating labels within the correct scope.
-CRE and MDR classifications are needed here because they determine which
-observations can enter the main susceptibility-reporting populations.
+CRE and MDR classifications in `phenotype_organisms` determine which observations can enter the main susceptibility-reporting populations.
 
 ## 5. Build reporting cultures and reconcile their AST
 
-The source organism observations now have resistance classifications.
-Assign each observation to its reporting category, limit the population
-to the reporting period, and combine source labels that belong to the
-same reporting culture and category.
+Classified observations receive reporting categories, are restricted to the reporting period, and are consolidated within each culture and category.
 
-The overall *S. aureus* population also needs a separate culture-level
-view that combines labels across phenotypes. First-culture selection per
-patient follows in the next stage.
+A separate overall *S. aureus* view combines labels across phenotypes before first-culture selection.
 
 ### 5.1 Assign categories and apply the reporting period
 
-Assign the reporting category in the same priority order as the SQL:
-CRE, MDR *P. aeruginosa*, oxacillin resistance, vancomycin resistance,
-ESCE-R, and then `base`. The `base` category means that no positive
-phenotype above took precedence; it does not establish susceptibility
-or exclude incomplete phenotype testing.
+Reporting categories follow the SQL priority: CRE, MDR *P. aeruginosa*, oxacillin resistance, vancomycin resistance, ESCE-R, and then `base`. The `base` category means no positive phenotype above took precedence; it neither establishes susceptibility nor rules out incomplete phenotype testing.
 
-Apply the inclusive start and exclusive end dates in UTC. The source
-labels on each culture share the consolidated culture timestamp, so
-filtering them before combining labels preserves the reporting scope.
+The UTC reporting window includes its start date and excludes its end date. All labels on a culture share its consolidated timestamp, so filtering before label consolidation preserves the reporting scope.
 
 ```{r categorize-and-filter-reporting-observations}
 window_organisms =
@@ -850,9 +759,7 @@ overall_culture_id = c(
 
 ### 5.2 Combine source labels within the correct reporting scope
 
-When source labels are combined, retain their original names as a list
-for traceability. Combine phenotype evidence using the precedence
-`positive`, `not_evaluable`, `not_detected`, and `not_applicable`.
+Consolidation retains original source names as lists for traceability. Phenotype evidence follows the precedence `positive`, `not_evaluable`, `not_detected`, and `not_applicable`.
 
 `reporting_cultures` combines labels only within the same culture,
 organism reporting group, and phenotype. CRE and MDR groups remain
@@ -900,10 +807,7 @@ overall_cultures =
 
 ### 5.3 Define a shared reconciliation for reporting-level AST
 
-There are two distinct reconciliation scopes in this project. Stage 2
-resolved repeated values within one original organism label. Here,
-combine those already-reconciled endpoints across source labels within
-a reporting group.
+Reconciliation has two scopes: Section 2 resolves repeated results within an original organism label; this stage combines those reconciled endpoints across source labels within a reporting group.
 
 Any source endpoint marked as conflicting keeps the reporting result
 in conflict. Different resolved results also conflict. One consistent
@@ -918,8 +822,7 @@ endpoint. An endpoint absent from a label contributes no AST record.
 | Any source endpoint already marked conflict | Conflict |
 | Missing endpoints only | Missing |
 
-Define one function so both the stratified and overall populations use
-this reconciliation consistently.
+A shared function applies the same reporting-level reconciliation to stratified and overall populations.
 
 ```{r define-reporting-ast-reconciliation}
 reconcile_reporting_ast = function(data, group_columns) {
@@ -966,14 +869,9 @@ reconcile_reporting_ast = function(data, group_columns) {
 
 ### 5.4 Reconcile AST separately for stratified and overall cultures
 
-Attach the reporting identities to the original endpoints using all
-culture and original-organism keys. This retains each endpoint's link
-to the original label that supplied its phenotype evidence.
+Reporting identities are attached using all culture and original-organism keys, preserving each endpoint's link to the source label that supplied its phenotype evidence.
 
-For stratified reporting, retain the main susceptibility source
-categories and reconcile within phenotype. MSSA candidates will be
-derived from qualifying `base` *S. aureus* cultures in the next stage.
-For overall *S. aureus*, reconcile across all its labels on the culture.
+Stratified AST is reconciled within the main susceptibility source categories and phenotype. Qualifying `base` *S. aureus* cultures provide MSSA candidates. Overall *S. aureus* AST is reconciled across all its source labels on a culture.
 
 ```{r reconcile-stratified-and-overall-ast}
 window_ast =
@@ -1011,10 +909,7 @@ overall_ast =
 
 ### 5.5 Inspect the reporting populations and AST statuses
 
-Review the number of source observations in the window, the resulting
-phenotype culture groups, and the separate overall *S. aureus* cultures.
-The overall and stratified views overlap; their counts are not additive
-unique-culture or unique-patient totals.
+The summaries describe in-window source observations, consolidated phenotype groups, and overall *S. aureus* cultures. Overall and stratified views overlap, so their counts are not additive unique-culture or unique-patient totals.
 
 ```{r check-reporting-cultures-and-ast}
 reporting_scope_check = tibble(
@@ -1051,9 +946,7 @@ reporting_cultures %>%
 print(reporting_ast_check, n = Inf)
 ```
 
-The next stage will select each patient's first qualifying culture
-independently within each published category, including separate MRSA,
-MSSA, and overall *S. aureus* populations.
+
 
 ## 6. Select the first qualifying culture within each reporting category
 
@@ -1067,13 +960,9 @@ The reporting window was already applied in the previous stage.
 
 ### 6.1 Reproduce the deterministic culture ordering
 
-Order cultures by their shifted timestamp. When timestamps tie, the SQL
-uses a hashed culture key to choose consistently. Reproduce that key
-from the same ordered identifiers so that R selects the same culture.
-The hash helper uses the `digest` package. If it is unavailable, install
-it once with `install.packages("digest")` in the console.
+Cultures are ordered by shifted timestamp, with ties resolved by the same hashed culture key used in SQL. The `digest` helper reproduces dbt's ordered identifiers and missing-value representation so both implementations select the same culture.
 
-This helper will also be reused when creating the final mart key.
+The same helper generates the final mart key.
 
 ```{r create-culture-ordering-keys}
 make_dbt_key = function(data, key_columns) {
@@ -1122,10 +1011,7 @@ evidence. All observed marker endpoints must be resolved Susceptible;
 missing, conflicting, Intermediate, or Resistant marker endpoints block
 qualification.
 
-The grouping below starts with observed marker rows, so every resulting
-group contains at least one marker. `all()` then requires every observed
-marker in that group to be resolved Susceptible. A culture with no marker
-endpoint cannot enter this marker table.
+At least one oxacillin or cefoxitin endpoint is required; cultures without marker testing cannot qualify as MSSA.
 
 ```{r identify-mssa-marker-cultures}
 mssa_marker_cultures =
@@ -1171,10 +1057,7 @@ the category as `oxacillin_susceptible`.
 
 ### 6.3 Define the remaining published categories
 
-Include ordinary non-*S. aureus* organisms, ESCE-R observations without
-positive CRE evidence, VRE in the two defined *Enterococcus* species,
-and MRSA in *S. aureus*. CRE and MDR *P. aeruginosa* groups do not enter
-these main susceptibility populations.
+The main susceptibility populations include ordinary non-*S. aureus* organisms, ESCE-R observations without positive CRE evidence, VRE in the two defined *Enterococcus* species, and MRSA in *S. aureus*. CRE and MDR *P. aeruginosa* groups are excluded from these populations.
 
 ```{r create-stratified-reporting-candidates}
 ordinary_candidates =
@@ -1218,10 +1101,7 @@ stratified_candidates =
 
 ### 6.4 Select first cultures independently within each category
 
-Sort eligible cultures by time and the deterministic culture key, then
-retain the first row in each patient-category group. Each published
-category has at most one candidate row per culture after consolidation,
-so the culture key resolves timestamp ties within that group.
+The earliest eligible culture is selected within each patient-category group using shifted timestamp and the deterministic culture key. After consolidation, each category has at most one candidate row per culture, allowing the key to resolve timestamp ties.
 
 The overall *S. aureus* selection uses all its eligible cultures,
 regardless of MRSA or MSSA qualification.
@@ -1266,14 +1146,9 @@ selected_cultures =
 
 ### 6.5 Attach AST for each selected culture and scope
 
-For stratified selections, use the original source phenotype when
-matching AST. This is particularly important for MSSA, whose published
-category differs from its `base` source category. Overall *S. aureus*
-uses the separate overall reconciliation.
+Stratified AST is matched using the original source phenotype. MSSA retains its `base` source link while publishing a different category. Overall *S. aureus* uses the separately reconciled overall AST.
 
-Keep `selected_cultures` as the eligible population independently of
-the AST join. A selected culture without an antibiotic endpoint must
-still contribute to the eligible reporting denominator.
+`selected_cultures` defines the eligible reporting population independently of the AST join. Selected cultures without antibiotic endpoints still contribute to the eligible denominator.
 
 ```{r attach-selected-culture-ast}
 selected_columns = c(
@@ -1328,15 +1203,9 @@ selected_culture_id = c(
 
 ### 6.6 Check selections against the supplied Tableau populations
 
-Review the candidate and selected counts. Then compare the nine
-*S. aureus* category counts against the eligible counts in the supplied
-Tableau CSV. These expected values apply to the current 2025-04-11
-release and 2023 reporting window.
+Candidate and selected counts are summarized, and the nine *S. aureus* category counts are compared with the dbt-generated Tableau reference. Reference counts apply to ARMD release `2025-04-11` and the 2023 reporting window.
 
-MRSA and MSSA counts need not sum to the overall count because each
-population selects its first culture independently. For example, the
-supplied urine populations contain 22 MRSA, 38 MSSA, and 58 overall
-patient-category observations.
+MRSA and MSSA counts need not sum to the overall count because each population selects its first culture independently. The urine reference populations contain 22 MRSA, 38 MSSA, and 58 overall patient-category observations.
 
 ```{r check-first-culture-selections}
 first_selection_check = tibble(
@@ -1391,23 +1260,15 @@ selected_cultures %>%
   print(n = Inf)
 ```
 
-The next stage will expand the selected populations to approved
-organism-antibiotic pairs, apply scoped exclusions, and calculate the
-final mart's counts, percentages, and display flags.
+
 
 ## 7. Apply antibiotic panels and build the susceptibility mart
 
-Start with the selected cultures, expand each population to its approved
-antibiotics, and then attach AST. This keeps untested antibiotics in the
-eligible denominator. Apply the same reviewed panel and exclusion files
-as the SQL pipeline.
+Selected cultures are expanded to approved antibiotic pairs before AST is attached, retaining untested antibiotics in the eligible denominator. Panel and exclusion definitions are shared with the SQL pipeline.
 
 ### 7.1 Load approved antibiotic pairs and exclusion rules
 
-Only panel rows marked for the primary dashboard and reviewed are
-approved. An exclusion can apply to one cohort or phenotype, or to all
-of them using `*`. These are the project's existing reporting policies;
-they do not change the AST evidence retained in earlier stages.
+Approved pairs are marked both reviewed and enabled for the primary dashboard. Exclusions may target a cohort or phenotype, or use `*` for all values. These project reporting policies affect published populations without changing the underlying AST evidence.
 
 ```{r load-antibiotic-reporting-rules}
 approved_pairs =
@@ -1445,11 +1306,7 @@ exclusion_rules =
 
 ### 7.2 Determine which pairs each reporting population can publish
 
-The same organism can have different exclusions in its ordinary and
-resistant categories. Resolve those rules after the published phenotype
-is known. Make a distinct list of excluded combinations, then remove
-them with `anti_join()`. Overlapping rules therefore cannot multiply
-the reporting rows.
+Exclusions are resolved after the published phenotype is known because ordinary and resistant categories can have different reporting rules. A distinct set of excluded combinations is removed, preventing overlapping rules from multiplying rows.
 
 The panel joins intentionally expand one population to several
 antibiotics and reuse the same organism panel across phenotypes.
@@ -1497,11 +1354,7 @@ reporting_pairs =
 
 ### 7.3 Expand selected cultures and attach their antibiotic results
 
-Every eligible culture receives one row for each permitted antibiotic.
-The `left_join()` then attaches any observed endpoint. A missing joined
-status means the antibiotic was untested. An endpoint whose status is
-`missing` means it was present in the source but lacked a usable result;
-these are counted separately.
+Every eligible culture receives one row per permitted antibiotic, with any observed endpoint attached by a left join. An absent joined endpoint is counted as untested; a source endpoint without a usable result is counted separately as `missing`.
 
 ```{r expand-cultures-and-attach-endpoints}
 eligible_grid =
@@ -1534,13 +1387,9 @@ reporting_endpoints =
 
 ### 7.4 Calculate result counts
 
-Summarise to one row per reporting population and antibiotic.
-`categorized_count` includes only resolved Susceptible, Intermediate,
-and Resistant results. Inconclusive, Synergism, missing, conflicting,
-and untested endpoints remain separate counts.
+Aggregation produces one row per reporting population and antibiotic. `categorized_count` includes resolved Susceptible, Intermediate, and Resistant results. Inconclusive, Synergism, missing, conflicting, and untested endpoints remain separate counts.
 
-Using `%in%` below produces `FALSE` for missing values, so absent
-endpoints cannot turn a count into `NA`.
+
 
 ```{r aggregate-susceptibility-counts}
 mart_counts =
@@ -1594,14 +1443,9 @@ Coverage uses all eligible observations as its denominator. Percent
 susceptible and percent resistant use only categorized S/I/R results.
 A zero denominator produces `NA`.
 
-The helper rounds nonnegative percentages to one decimal with ties
-rounded upward, matching the SQL. Base R's `round()` uses a different
-tie rule. Scaling the counts by 1,000 before dividing also avoids
-introducing an extra rounding step at percentage half-ties.
+Percentages are rounded to one decimal with half-ties rounded upward, matching SQL. The helper avoids base R's ties-to-even behavior and an additional rounding step at percentage half-ties.
 
-The display flag requires at least 30 categorized results. Keep all
-rows and their calculated percentages, including those flagged
-`insufficient_data`.
+The display flag requires at least 30 categorized results. All rows and calculated percentages remain in the mart, including those marked `insufficient_data`.
 
 ```{r finish-susceptibility-mart}
 percentage_1dp = function(numerator, denominator) {
@@ -1649,16 +1493,11 @@ mart_susceptibility_r =
   )
 ```
 
-The resulting `mart_susceptibility_r` uses the same 26 columns and
-column order as the supplied Tableau CSV. Its row order is for
-readability; the final comparison will match rows by their keys.
+`mart_susceptibility_r` preserves the Tableau reference's 26 columns and column order. The output is sorted for readability; validation matches rows by identity rather than position.
 
 ### 7.6 Check the mart's structure and count reconciliation
 
-For the supplied release, window, and seed files, expect 396 rows,
-26 columns, and 73 reporting populations. Every failure count below
-should be zero. The display-status counts should be 187 `display`
-and 209 `insufficient_data`.
+The recorded run produces 396 rows, 26 columns, and 73 reporting populations, with zero structural or count-reconciliation failures. Display status is `display` for 187 rows and `insufficient_data` for 209 rows. These counts depend on the stated release, window, and reference tables.
 
 ```{r check-susceptibility-mart}
 mart_build_check =
@@ -1708,28 +1547,17 @@ mart_susceptibility_r %>%
   print(n = 20, width = Inf)
 ```
 
-Matching these totals checks the structure, but does not yet establish
-that every result matches SQL. The next stage will compare all rows and
-fields with the supplied Tableau CSV, then export the verified R mart.
+Structural and balance checks are supplemented by a complete row and field comparison against the dbt-generated Tableau export.
 
 ## 8. Validate against the Tableau CSV and export the R mart
 
-The structure and count checks passed in Step 7. Now compare the actual
-values with the existing SQL-generated Tableau CSV. Match rows using
-their five identifying fields, so differences in row order do not affect
-the comparison. Compare all remaining fields, including the mart hash,
-counts, percentages, display flags, dates, and Gram group.
+The final comparison matches the R mart and dbt-generated Tableau CSV on five identifying fields, independently of row ordering. It then checks every remaining field, including the mart hash, counts, percentages, display flags, dates, and Gram classification.
 
 ### 8.1 Import the existing Tableau export with explicit types
 
-Set `tableau_reference_file` to your existing Tableau data-source CSV.
-The path below is an example; there is no need to move or duplicate the
-file. Use the same working directory as the previous sections.
+The validation reference is `data/exports/mart_susceptibility.csv`, the dbt-generated dataset used by Tableau.
 
-Keep `source_version` as text even though it looks like a date. Parse the
-two analysis-window fields as dates and the measures as numbers. The
-supplied export uses the literal lowercase `null` for missing percentages,
-so recognize that value as `NA` during import.
+Explicit import types preserve `source_version` as text, parse analysis-window fields as dates, and parse measures as numbers. The reference export's lowercase `null` marker is interpreted as a missing value.
 
 ```{r import-tableau-reference-mart}
 tableau_reference_file = "../data/exports/mart_susceptibility.csv"
@@ -1771,10 +1599,7 @@ if (nrow(reference_parse_problems) > 0L) {
 
 ### 8.2 Check column names and row identities
 
-Both tables must contain the same column names. The natural row identity
-is `source_version`, `cohort_id`, `organism_reporting_group`,
-`reporting_phenotype`, and `antibiotic`, already stored in `mart_id`.
-Check these fields for missing values and duplicates before joining.
+Column-name and row-identity checks precede comparison. The natural key in `mart_id` comprises `source_version`, `cohort_id`, `organism_reporting_group`, `reporting_phenotype`, and `antibiotic`; missing or duplicate keys block the comparison.
 
 ```{r check-mart-comparison-structure}
 column_check = tibble(
@@ -1834,8 +1659,7 @@ if (any(key_check$duplicate_key_rows > 0L | key_check$missing_key_rows > 0L)) {
 
 ### 8.3 Find missing or extra rows
 
-The two `anti_join()` operations identify any row identities present in
-only one table. Both results should have zero rows.
+Two anti-joins identify row identities present in only one dataset. The recorded run contains no missing or extra rows.
 
 ```{r compare-mart-row-populations}
 missing_from_r =
@@ -1852,11 +1676,7 @@ print(extra_in_r, n = 20, width = Inf)
 
 ### 8.4 Compare every remaining field
 
-Convert the values to a common text representation after numbers and
-dates have been parsed. This allows different field types to appear in
-one long comparison table. Numeric values such as `100` and `100.0`
-compare equally; dates use their ISO representation. Text values retain
-their spelling and whitespace.
+Parsed numbers and dates are converted to a common text representation for comparison across field types. Equivalent numeric formats such as `100` and `100.0` match; dates use ISO representation, and text retains its spelling and whitespace.
 
 The join compares fields only for matching row identities. Missing and
 extra rows are checked separately above. Two missing values match, while
@@ -1926,20 +1746,13 @@ print(comparison_check, width = Inf)
 print(field_differences, n = 20, width = Inf)
 ```
 
-For the supplied CSV, expect 396 rows in both tables, zero missing or
-extra rows, and zero field mismatches. The comparison covers 21 nonkey
-fields across 396 rows: 8,316 field values, in addition to the five
-identifying fields. `matches_reference` should be `TRUE`.
+The recorded comparison matches all 396 row identities and all 8,316 values across 21 nonkey fields, with zero missing rows, extra rows, or field mismatches. `matches_reference` is `TRUE`.
 
-If differences appear, review `field_differences`, `missing_from_r`, and
-`extra_in_r`. The export below stops when the comparison fails.
+Mismatch tables retain row and field differences for diagnosis. Export is blocked whenever the complete comparison fails.
 
 ### 8.5 Export the verified R mart
 
-Write a separate R-generated CSV after the comparison passes. Keep the
-reference column order and use the same lowercase `null` missing-value
-marker as the supplied export. Change `output_file` if you prefer a
-different output folder.
+The verified R mart is written to `data/processed/mart_susceptibility_r.csv` with the reference column order and lowercase `null` missing-value marker.
 
 ```{r export-verified-r-mart}
 if (!isTRUE(comparison_check$matches_reference)) {
@@ -1964,7 +1777,4 @@ export_check = tibble(
 print(export_check, width = Inf)
 ```
 
-When these checks pass, this R Markdown document demonstrates the
-complete transformation from the original cultures CSV to the same
-cleaned susceptibility mart used by Tableau, using the project's shared
-reference tables and tidyverse transformations.
+This R implementation reproduces the dashboard mart from the original cultures CSV through tidyverse transformations, using the project's shared reporting definitions and reference data. Its recorded agreement with the dbt export demonstrates consistent transformation results across implementations.
