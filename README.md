@@ -99,6 +99,15 @@ Both builds reproduce the transformations behind [`mart_susceptibility`](dbt/mod
 
 The builds run independently of each other and require no Databricks connection. Each document runs in order within one session; the R source uses paths relative to `R/`, while the Python notebook locates the repository root. These implementations reproduce the susceptibility mart; the separate MDRO mart remains part of the dbt pipeline.
 
+### Antibiograms with ggplot2 and Matplotlib
+
+To demonstrate visualization skills alongside Tableau, I also recreated the antibiogram tables with **ggplot2 in R** and **Matplotlib in Python**. Both notebooks read `data/exports/mart_susceptibility.csv` and generate six tables covering blood, urine, and respiratory cultures, with separate Gram-positive and Gram-negative views. Organism rows, antibiotic columns, counts, and susceptibility percentages come directly from the mart.
+
+- **R / ggplot2:** [R Markdown notebook](R/plot_antibiogram.Rmd) and [rendered report with code and charts](R/plot_antibiogram.md).
+- **Python / Matplotlib:** [Jupyter notebook with code and charts](notebooks/python_build/plot_antibiogram.ipynb).
+
+Each notebook runs independently and saves PNG figures in `docs/figures/antibiogram/r/` or `docs/figures/antibiogram/python/`, respectively.
+
 ## Key analytical and modeling decisions
 
 1. **Preserve source grain and provenance.** Culture orders, source culture–organism observations, and organism–antibiotic endpoints are separate. Reviewed mappings retain the original labels and qualifiers.
