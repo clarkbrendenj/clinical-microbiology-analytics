@@ -332,11 +332,13 @@ All percentages are calculated from the relevant mart row's counts and rounded t
 
 Rates with no usable denominator are null rather than fabricated zeroes. Selective antimicrobial testing may make `susceptible_pct` unrepresentative of the full eligible organism population even when the categorized count meets the display threshold.
 
-### Display threshold
+### Sample-size flag and exploratory display
 
-`display_status = 'display'` when `categorized_count >= 30`; otherwise it is `insufficient_data`.
+The mart retains `display_status = 'display'` when `categorized_count >= 30`; otherwise it is `insufficient_data`. This flag does not remove rows or change their calculated percentages.
 
-The mart retains insufficient-data rows for audit; the Tableau reporting view should suppress or clearly mark their susceptibility percentages. The threshold is a **project display policy**, not certification of CLSI M39 compliance. A genuine 0% susceptibility differs from an insufficiently tested combination.
+The Tableau and ggplot/matplotlib antibiograms intentionally show available susceptibility percentages **without filtering on `display_status`**, so low-count organisms and phenotype populations remain visible. Interpret each percentage with its drug-specific `categorized_count`; values flagged `insufficient_data` have limited sample support. Approved-pair exclusions still apply, and a result with no categorized denominator remains blank rather than zero.
+
+The 30-result flag is a **project reporting convention**, not certification of CLSI M39 compliance. These unfiltered figures are exploratory portfolio outputs, not clinical reporting. A genuine 0% susceptibility differs from both a missing denominator and a percentage based on few results.
 
 ## MDRO reporting mart
 
@@ -422,64 +424,44 @@ The custom assertions in `dbt/tests/` are:
 - `assert_reporting_window_selection`: checks that selected overall and stratified culture timestamps lie within the configured window; the date predicate is unrestricted in full-release mode.
 - `assert_no_mdro_in_main_susceptibility`: checks exclusion of CRE/MDR reporting categories and their selected-record evidence.
 - `assert_no_suppressed_or_unapproved_pairs`: enforces the allow-list and exclusion overrides.
+- `assert_scoped_exclusions_have_approved_pairs`: checks that cohort/category-specific exclusions identify an active reviewed antibiotic pair.
 
 Notebook 13 supplies the phenotype inventory, overlap checks, *S. aureus* population inspection, MDRO summary, AST-scope review, and display-coverage results. Notebook 14 documents preselection availability by shifted year and month. Their saved outputs include both full-release and 2023 evidence; their Markdown labels the scope of each.
 
-### Notebook checks and execution status
+### Recorded build and current exports
 
-- Notebook 07 retains source vocabulary and reference-policy checks. Its obsolete inactive-proposal query was removed; reassessing proposals requires the matching category population and reporting window.
-- Notebook 10 checks the overall *S. aureus* branch. Its earliest-culture reconstruction now ranks *S. aureus* in the already-windowed `int_culture_reporting_observation` model. The old all-organism/full-release comparisons were removed.
-- Notebook 11 inventories all categories with their window dates and retains structural, arithmetic, approval, suppression, overall *S. aureus* denominator, display, and Gram checks. The obsolete base-absence gate, subgroup-within-overall assertion, MRSA+MSSA sum assertion, all-organism overall-pair audit, and old E. coli example were removed. Category-specific completeness and population bounds remain covered by the dbt assertions above.
-- Notebook 12 independently reconstructs patient-level MDRO status from upstream observations filtered to the distinct start/end pair in `mart_mdro`. Filtering precedes both CRE/MDR branches and patient aggregation. Start is inclusive; end is exclusive; null/null dates select full-release observations with non-null timestamps. An empty mart, mixed windows, one-sided null, or non-increasing range returns `invalid_reporting_window`. Confirm the returned dates against the intended configuration: the reconstruction uses the mart's recorded bounds rather than independently proving that configuration.
+The saved full `dbt build` results were generated on **October 13, 2026, at 11:30 p.m. Eastern** (`2026-10-14T03:30:57Z`): **22 models, 4 reference seeds, and 229 passing data tests** — **255 successful operations**, with no error, warning, or skipped result statuses. The saved manifest uses the 2023 window; its model SQL and reference-seed checksums match the current files. These are recorded results, not a new warehouse build performed during this documentation update.
 
-Changed queries have cleared outputs and execution counts; unchanged query outputs retain their original execution scope. No warehouse queries or dbt build were run during the cleanup. Rerun the revised cells, especially Notebook 12 section 2, and save their results before claiming fresh validation. For the current MDRO comparison, expect the recorded bounds `2023-01-01` and `2024-01-01` and only `pass`; the full-release 34-row snapshot is not an expected annual row count.
+The current exports in `data/exports/` record `analysis_window_start = 2023-01-01` and `analysis_window_end_exclusive = 2024-01-01`:
 
-### Recorded build and reporting snapshots
+| Export | Rows | Status |
+|---|---:|---|
+| `mart_susceptibility.csv` | 396 | 187 rows meet the 30-result flag; 209 are flagged `insufficient_data` |
+| `mart_mdro.csv` | 32 | Patient-level CRE and MDR *P. aeruginosa* summaries |
 
-The saved full `dbt build` completed on **October 12, 2026, at 10:48 p.m. Eastern** (`2026-10-13T02:48:09Z`): **22 models, 4 reference seeds, and 224 passing data tests** — **250 successful operations**, with no error, warning, or skipped result statuses. The saved compiled manifest uses the 2023 window. These are recorded build results; the documentation revision did not execute a new warehouse build.
+The reference seeds contain 41 organism-mapping rows, 20 organism/Gram groups, 311 active approved cohort-specific pairs, 11 inactive proposals, and **61 exclusion rules: 33 broad plus 28 cohort/category-specific rules**. These rules are applied to the category-specific reporting grid; their counts are not expected mart-row totals. The MDRO model does not depend on the susceptibility exclusion seed.
 
-The reference seeds contain 41 organism-mapping rows, 20 organism/Gram groups, 311 active approved cohort-specific pairs, 11 inactive proposals, and **61 exclusion rules: 33 broad plus 28 cohort/category-specific rules**. The original six active E. cloacae complex suppressions remain in place. Exclusions now act on the expanded category grid, so neither the rule count nor 305 is an expected mart-row total.
+### Current sample-size coverage by cohort
 
-Notebook 13 preserves the **pre-exclusion-update** full-release phenotype-stratified baseline and the explicitly dated 2023 coverage query. The tables below describe saved results before the 28 new scoped rules:
-
-| Reporting population | Full-release rows | Full-release displayable | 2023 rows | 2023 displayable |
+| Cohort | Mart rows | `categorized_count >= 30` | `insufficient_data` | Meeting flag (%) |
 |---|---:|---:|---:|---:|
-| Ordinary (`base`) | 287 | 264 | 266 | 129 |
-| ESCE-R | 89 | 53 | 89 | 19 |
-| Overall *S. aureus* | 18 | 18 | 18 | 18 |
-| MRSA | 18 | 18 | 18 | 12 |
-| MSSA | 18 | 18 | 18 | 16 |
-| VRE | 25 | 10 | 15 | 0 |
-| **Total** | **455** | **381** | **424** | **194** |
+| Blood | 147 | 56 | 91 | 38.1% |
+| Respiratory | 114 | 31 | 83 | 27.2% |
+| Urine | 135 | 100 | 35 | 74.1% |
+| **Total** | **396** | **187** | **209** | **47.2%** |
 
-The saved full-release MDRO table in Notebook 13 contains **34 rows**: 31 CRE rows across the cohorts plus three MDR *P. aeruginosa* rows. That is a baseline count, not a verified 2023 MDRO count.
+These percentages measure the fraction of reporting rows meeting the 30-result flag, not susceptibility or patient-level testing coverage. The exploratory antibiograms retain available percentages from both flag states. Low counts do not establish absence of an organism or resistance phenotype.
 
-### 2023 display coverage by cohort
+### Saved notebook evidence and historical scope
 
-| Cohort | Mart rows | Displayable | Insufficient data | Displayable (%) |
-|---|---:|---:|---:|---:|
-| Blood | 158 | 59 | 99 | 37.3% |
-| Respiratory | 123 | 32 | 91 | 26.0% |
-| Urine | 143 | 103 | 40 | 72.0% |
-| **Total** | **424** | **194** | **230** | **45.8%** |
+- Notebook 07 examines source vocabulary and reference-policy checks.
+- Notebook 10 checks overall *S. aureus* selection against the earliest culture in the window-filtered `int_culture_reporting_observation` population.
+- Notebook 11 checks the reporting grid, counts, percentages, denominators, exclusions, sample-size flags, and Gram classification. Saved tables should be read with their recorded window and reference-policy scope.
+- Notebook 12 independently reconstructs patient-level MDRO status from upstream observations within the distinct start/end pair recorded in `mart_mdro`. Its saved result reports **`pass`, 32 rows, and the bounds `2023-01-01` and `2024-01-01`**. Filtering precedes both CRE/MDR branches and patient aggregation. The reconstruction uses the mart's recorded bounds; it does not independently prove the intended configuration.
+- Notebook 13 preserves historical full-release and pre-exclusion-update comparisons: **455 susceptibility rows** in the full-release baseline, **424 susceptibility rows** in the earlier 2023 export, and **34 MDRO rows** in the full-release baseline. These are distinct historical snapshots, not expected row counts for the current exports. The 28 scoped exclusion rules reduce the earlier 2023 susceptibility result from 424 to the current 396 rows.
+- Notebook 14 explores shifted-year and monthly coverage before first-culture selection. Its saved monthly check has observations in all 12 shifted months for each cohort. That demonstrates monthly representation, not completeness of source capture or a clinical calendar-year population.
 
-The 2023 coverage query records `analysis_window_start = 2023-01-01` and `analysis_window_end_exclusive = 2024-01-01` for all returned groups. Here, `pct_displayable = 100 × displayable_pairs / total_pairs` (one decimal); it measures reporting-row coverage, not patient susceptibility or AST testing coverage. Across cohorts, 194 of 424 rows (45.8%) are displayable and 230 are insufficient-data rows. The full-release comparison is 381 of 455 rows (83.7%): the window has 187 fewer displayable rows, or 49.1% fewer.
-
-Urine retains 80 of 91 ordinary/base pairs. Overall *S. aureus* retains all six antibiotics in each cohort. No VRE, respiratory ESCE-R, or urine MRSA percentages are designated for display. Low counts do not establish absence of the phenotype; insufficient-data rows remain available for audit.
-
-Notebook 14's monthly check counts distinct culture keys in `int_reporting_culture_organism` before final first-culture selection. All 12 shifted months have observations in each cohort: 961 blood, 719 respiratory, and 8,611 urine cultures across the monthly output. These are not raw culture-order totals, unique patient counts, or drug-specific categorized denominators. They demonstrate monthly representation, not completeness of source capture.
-
-Applying the 28 scoped rules to the saved 424-row 2023 export removes exactly those 28 rows: 7 displayable and 21 insufficient-data. The projected revised susceptibility mart has **396 rows, 187 displayable and 209 insufficient-data**. These are offline projection counts; rebuild the seed and susceptibility mart, run the tests, and refresh the notebook outputs and Tableau export before claiming a completed warehouse update. The MDRO model does not depend on the exclusion seed.
-
-The seed gained two columns, so apply this change from the `dbt` directory with a full refresh of the exclusion seed and its downstream mart/tests:
-
-```bash
-dbt build --full-refresh --select organism_antibiotic_exclusions+
-```
-
-Then rerun Notebooks 07, 11, and 13 and refresh the susceptibility export used by Tableau. The command targets the exclusion seed and its descendants; it does not rebuild upstream phenotype evidence or `mart_mdro`.
-
-All snapshot counts depend on the source release, model version, reference seeds, and reporting window. Preserve window labels in exports and keep old and new runs distinct.
+All snapshot counts depend on the source release, model version, reference seeds, and reporting window. Preserve window labels in exports and distinguish historical results from the current build.
 
 ## Interpretation limitations
 

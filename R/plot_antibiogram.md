@@ -25,8 +25,7 @@ each divided into Gram-positive and Gram-negative organisms.
 
 The only data input is `data/exports/mart_susceptibility.csv`. Organism
 rows and antibiotic columns are derived from that file and sorted
-alphabetically. Every available mart row is included, including small
-populations; the screenshots serve only as a visual reference. `%S`
+alphabetically. These are unfiltered exploratory antibiograms: every available mart row is included, including small populations flagged `insufficient_data`, to keep low-count organisms visible. `%S`
 comes from `susceptible_pct`, and `N` is the population’s
 `eligible_count`, displayed once rather than summed across antibiotics.
 Missing percentages stay blank; true zero susceptibility is displayed as

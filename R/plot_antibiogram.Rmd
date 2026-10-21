@@ -9,7 +9,7 @@ output:
 
 This notebook uses **ggplot2** to visualize the existing susceptibility mart as six antibiogram tables: blood, urine, and respiratory cultures, each divided into Gram-positive and Gram-negative organisms.
 
-The only data input is `data/exports/mart_susceptibility.csv`. Organism rows and antibiotic columns are derived from that file and sorted alphabetically. Every available mart row is included, including small populations; the screenshots serve only as a visual reference. `%S` comes from `susceptible_pct`, and `N` is the population's `eligible_count`, displayed once rather than summed across antibiotics. Missing percentages stay blank; true zero susceptibility is displayed as `0%`.
+The only data input is `data/exports/mart_susceptibility.csv`. Organism rows and antibiotic columns are derived from that file and sorted alphabetically. These are unfiltered exploratory antibiograms: every available mart row is included, including small populations flagged `insufficient_data`, to keep low-count organisms visible. `%S` comes from `susceptible_pct`, and `N` is the population's `eligible_count`, displayed once rather than summed across antibiotics. Missing percentages stay blank; true zero susceptibility is displayed as `0%`.
 
 **Packages:** ggplot2 for plotting, with knitr and rmarkdown for knitting. Open this file in RStudio and Knit, or run `rmarkdown::render("R/plot_antibiogram.Rmd", encoding = "UTF-8")` from the repository root. PNGs are saved in `docs/figures/antibiogram/r/`.
 
